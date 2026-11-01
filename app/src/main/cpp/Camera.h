@@ -1,5 +1,7 @@
 #pragma once
 
+#include "WorldGenerator.h"
+
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
@@ -12,9 +14,13 @@ public:
     float movementSpeed = 5.0F;
     float lookSensitivity = 0.15F;
     float fov = 70.0F;
+    float verticalVelocity = 0.0F;
+    float gravity = 24.0F;
+    float eyeHeight = 1.7F;
 
     void processLook(float deltaX, float deltaY);
-    void processMovement(float forward, float strafe, float deltaTime);
+    void processMovement(float forward, float strafe, float deltaTime,
+                         const WorldGenerator& world);
 
     [[nodiscard]] glm::mat4 getViewMatrix() const;
     [[nodiscard]] glm::mat4 getProjectionMatrix(float aspect) const;

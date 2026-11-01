@@ -58,9 +58,16 @@ Status describes repository evidence. A checked item means the corresponding cod
 
 ### B.4 — World Generation
 
-- [ ] Deterministic terrain noise
-- [ ] Biome selection and terrain shaping
-- [ ] Seed/version persistence
+- [x] Deterministic heightmap noise with FastNoiseLite
+- [x] Secondary OpenSimplex2 detail noise
+- [x] Grass, dirt, and stone surface layering
+- [x] Vertical chunk sections for terrain heights above Y=16
+- [x] Runtime seed parameter (prototype default: 12345)
+- [x] Gravity and heightmap-based floor collision
+- [ ] Apply biome selection to surface materials and terrain shaping
+- [ ] Persist world seed and generator version
+
+**B.4 limitations:** only the X/Z chunk column at (0, 0) is rendered; this is not horizontal chunk streaming. Biome noise is configured but not yet applied. The seed is currently a native constant, not a UI setting or saved-world property. Android build and device verification remain pending.
 
 ### B.5 — Chunk Streaming
 

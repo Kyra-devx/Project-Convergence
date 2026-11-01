@@ -5,11 +5,14 @@
 #include <jni.h>
 
 #include "Camera.h"
+#include "WorldGenerator.h"
 #include "convergence/chunk.hpp"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -23,7 +26,8 @@ namespace {
 constexpr char kLogTag[] = "ProjectConvergence";
 constexpr float kMaxDeltaTimeSeconds = 0.1F;
 
-std::unique_ptr<convergence::Chunk> g_demo_chunk;
+std::unique_ptr<WorldGenerator> g_world_generator;
+std::vector<convergence::Vertex> g_world_vertices;
 std::unique_ptr<Camera> g_camera;
 
 GLuint g_program = 0;
@@ -174,59 +178,88 @@ GLuint create_program(AAssetManager* manager) {
     return 0;
 }
 
-void build_demo_chunk() {
-    if (g_demo_chunk != nullptr) {
-        return;
-    }
+void build_generated_world(std::int64_t seed) {
+    g_world_generator = std::make_unique<WorldGenerator>(seed);
+    g_world_vertices.clear();
 
-    g_demo_chunk = std::make_unique<convergence::Chunk>();
+    constexpr int kVerticalChunkCount =
+        (WorldGenerator::MAX_TERRAIN_HEIGHT +
+         convergence::Chunk::kSize - 1) / convergence::Chunk::kSize;
+    std::array<std::uint8_t, convergence::Chunk::kBlockCount> blocks{};
 
-    // Three stepped layers create a visible block stack for the B.2/B.3 demo.
-    for (int x = 2; x < 14; ++x) {
-        for (int z = 2; z < 14; ++z) {
-            for (int y = 0; y < 3; ++y) {
-                (void)g_demo_chunk->set_block(
-                    x, y, z, convergence::Chunk::kStone);
+    // B.4 renders one X/Z chunk column. Extra Y sections expose the surface
+    // above Y=16; horizontal chunk streaming remains part of B.5.
+    for (int chunkY = 0; chunkY < kVerticalChunkCount; ++chunkY) {
+        g_world_generator->generateChunk(0, chunkY, 0, blocks.data());
+        convergence::Chunk chunk;
+
+        for (int x = 0; x < convergence::Chunk::kSize; ++x) {
+            for (int y = 0; y < convergence::Chunk::kSize; ++y) {
+                for (int z = 0; z < convergence::Chunk::kSize; ++z) {
+                    const std::size_t index =
+                        (static_cast<std::size_t>(x) *
+                             convergence::Chunk::kSize + y) *
+                            convergence::Chunk::kSize + z;
+                    const std::uint8_t block = blocks[index];
+                    if (block != convergence::Chunk::kAir) {
+                        (void)chunk.set_block(x, y, z, block);
+                    }
+                }
+            }
+        }
+
+        chunk.build_mesh();
+        const float yOffset = static_cast<float>(
+            chunkY * convergence::Chunk::kSize);
+        const auto& localVertices = chunk.mesh_vertices();
+
+        // The mesher treats missing neighbor chunks as air. Remove only the
+        // horizontal faces between contiguous vertical sections so no flat
+        // internal planes remain in the rendered terrain.
+        for (std::size_t face = 0; face + 5U < localVertices.size(); face += 6U) {
+            const convergence::Vertex& first = localVertices[face];
+            if (first.ny != 0.0F) {
+                const float planeY = first.y + yOffset;
+                const int boundaryY = static_cast<int>(planeY);
+                if (planeY == static_cast<float>(boundaryY) &&
+                    boundaryY > 0 &&
+                    boundaryY % convergence::Chunk::kSize == 0) {
+                    float centerX = 0.0F;
+                    float centerZ = 0.0F;
+                    for (std::size_t i = 0; i < 6U; ++i) {
+                        centerX += localVertices[face + i].x / 6.0F;
+                        centerZ += localVertices[face + i].z / 6.0F;
+                    }
+                    const float terrainHeight =
+                        g_world_generator->getTerrainHeight(centerX, centerZ);
+                    if (static_cast<float>(boundaryY) < terrainHeight) {
+                        continue;
+                    }
+                }
+            }
+
+            for (std::size_t i = 0; i < 6U; ++i) {
+                convergence::Vertex worldVertex = localVertices[face + i];
+                worldVertex.y += yOffset;
+                g_world_vertices.push_back(worldVertex);
             }
         }
     }
 
-    for (int x = 3; x < 13; ++x) {
-        for (int z = 3; z < 13; ++z) {
-            for (int y = 3; y < 6; ++y) {
-                (void)g_demo_chunk->set_block(
-                    x, y, z, convergence::Chunk::kDirt);
-            }
-        }
-    }
-
-    for (int x = 4; x < 12; ++x) {
-        for (int z = 4; z < 12; ++z) {
-            for (int y = 6; y < 9; ++y) {
-                (void)g_demo_chunk->set_block(
-                    x, y, z, convergence::Chunk::kGrass);
-            }
-        }
-    }
-
-    g_demo_chunk->build_mesh();
     __android_log_print(
-        ANDROID_LOG_INFO,
-        kLogTag,
-        "Demo chunk built: %zu visible faces, %zu vertices.",
-        g_demo_chunk->visible_face_count(),
-        g_demo_chunk->mesh_vertices().size()
-    );
+        ANDROID_LOG_INFO, kLogTag,
+        "Generated terrain seed=%lld: %zu visible faces, %zu vertices across %d vertical sections.",
+        static_cast<long long>(seed), g_world_vertices.size() / 6U,
+        g_world_vertices.size(), kVerticalChunkCount);
 }
 
 void upload_chunk_mesh() {
-    if (g_demo_chunk == nullptr || g_demo_chunk->mesh_vertices().empty()) {
+    if (g_world_vertices.empty()) {
         log_error("Cannot upload an empty chunk mesh.");
         return;
     }
 
-    const std::vector<convergence::Vertex>& vertices =
-        g_demo_chunk->mesh_vertices();
+    const std::vector<convergence::Vertex>& vertices = g_world_vertices;
 
     glGenVertexArrays(1, &g_vao);
     glBindVertexArray(g_vao);
@@ -270,6 +303,36 @@ void upload_chunk_mesh() {
 }  // namespace
 
 extern "C" JNIEXPORT void JNICALL
+Java_com_convergence_voxel_VoxelRenderer_nativeCleanup(
+    JNIEnv* /* env */,
+    jobject /* thiz */
+) {
+    // Runs on GLSurfaceView's GL thread while its EGL context is current.
+    if (g_vao != 0) {
+        glDeleteVertexArrays(1, &g_vao);
+        g_vao = 0;
+    }
+    if (g_vbo != 0) {
+        glDeleteBuffers(1, &g_vbo);
+        g_vbo = 0;
+    }
+    if (g_program != 0) {
+        glDeleteProgram(g_program);
+        g_program = 0;
+    }
+
+    g_mvp_location = -1;
+    g_vertex_count = 0;
+    g_last_frame_time_ms.store(0);
+    g_world_generator.reset();
+    std::vector<convergence::Vertex>().swap(g_world_vertices);
+    g_camera.reset();
+
+    std::lock_guard<std::mutex> lock(g_input_mutex);
+    g_pending_input = {};
+}
+
+extern "C" JNIEXPORT void JNICALL
 Java_com_convergence_voxel_VoxelRenderer_nativeInit(
     JNIEnv* env,
     jobject /* thiz */,
@@ -296,16 +359,14 @@ Java_com_convergence_voxel_VoxelRenderer_nativeInit(
     glCullFace(GL_BACK);
     glFrontFace(GL_CCW);
 
-    if (g_camera == nullptr) {
-        g_camera = std::make_unique<Camera>();
-        // Start just outside the demo structure, looking toward its center.
-        g_camera->position = glm::vec3{8.0F, 8.0F, 25.0F};
-        g_camera->yaw = -90.0F;
-        g_camera->pitch = -10.0F;
-        g_camera->fov = 70.0F;
-        g_camera->movementSpeed = 5.0F;
-        g_camera->lookSensitivity = 0.15F;
-    }
+    g_camera = std::make_unique<Camera>();
+    // Spawn above the generated terrain; gravity settles the player onto it.
+    g_camera->position = glm::vec3{8.0F, 80.0F, 14.0F};
+    g_camera->yaw = -90.0F;
+    g_camera->pitch = -25.0F;
+    g_camera->fov = 70.0F;
+    g_camera->movementSpeed = 5.0F;
+    g_camera->lookSensitivity = 0.15F;
 
     AAssetManager* manager = AAssetManager_fromJava(env, asset_manager);
     g_program = create_program(manager);
@@ -322,7 +383,7 @@ Java_com_convergence_voxel_VoxelRenderer_nativeInit(
         return;
     }
 
-    build_demo_chunk();
+    build_generated_world(12345);
     upload_chunk_mesh();
 }
 
@@ -384,7 +445,7 @@ Java_com_convergence_voxel_VoxelRenderer_nativeRender(
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
     if (g_program == 0 || g_vao == 0 || g_vertex_count <= 0 ||
-        g_camera == nullptr) {
+        g_camera == nullptr || g_world_generator == nullptr) {
         return;
     }
 
@@ -406,7 +467,8 @@ Java_com_convergence_voxel_VoxelRenderer_nativeRender(
 
     g_camera->processLook(input.look_dx, input.look_dy);
     g_camera->processMovement(
-        input.joy_forward, input.joy_strafe, delta_time);
+        input.joy_forward, input.joy_strafe, delta_time,
+        *g_world_generator);
 
     const float safe_aspect = std::max(aspect, 0.001F);
     const glm::mat4 mvp =

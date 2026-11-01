@@ -25,28 +25,34 @@ void Camera::processLook(float deltaX, float deltaY) {
     }
 }
 
-void Camera::processMovement(float forward, float strafe, float deltaTime) {
-    if (deltaTime <= 0.0F) {
-        return;
-    }
+void Camera::processMovement(float forward, float strafe, float deltaTime,
+                             const WorldGenerator& world) {
+    if (deltaTime <= 0.0F) return;
 
     glm::vec3 front = getFrontVector();
-
-    // FPS walking remains horizontal; pitch controls where the player looks,
-    // not whether the joystick makes the player fly or sink.
     front.y = 0.0F;
-    front = glm::normalize(front);
+    const float frontLength = glm::length(front);
+    if (frontLength > 0.0001F) front /= frontLength;
+    else front = glm::vec3{0.0F, 0.0F, -1.0F};
 
     const glm::vec3 worldUp{0.0F, 1.0F, 0.0F};
     const glm::vec3 right = glm::normalize(glm::cross(front, worldUp));
-
     glm::vec3 movement = front * forward + right * strafe;
     const float movementLength = glm::length(movement);
-    if (movementLength > 1.0F) {
-        movement /= movementLength;
-    }
+    if (movementLength > 1.0F) movement /= movementLength;
 
-    position += movement * movementSpeed * deltaTime;
+    glm::vec3 nextPosition =
+        position + movement * movementSpeed * deltaTime;
+    verticalVelocity -= gravity * deltaTime;
+    nextPosition.y += verticalVelocity * deltaTime;
+
+    const float groundY =
+        world.getTerrainHeight(nextPosition.x, nextPosition.z) + eyeHeight;
+    if (nextPosition.y < groundY) {
+        nextPosition.y = groundY;
+        verticalVelocity = 0.0F;
+    }
+    position = nextPosition;
 }
 
 glm::mat4 Camera::getViewMatrix() const {

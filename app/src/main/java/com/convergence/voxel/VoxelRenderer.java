@@ -20,6 +20,7 @@ final class VoxelRenderer implements GLSurfaceView.Renderer {
         this.assetManager = assetManager;
     }
 
+    private native void nativeCleanup();
     private native void nativeInit(AssetManager assets);
     private native void nativeResize(int width, int height);
     private native void nativeRender(long nowMs, float aspect);
@@ -29,6 +30,7 @@ final class VoxelRenderer implements GLSurfaceView.Renderer {
 
     @Override
     public void onSurfaceCreated(GL10 gl, EGLConfig config) {
+        nativeCleanup();
         nativeInit(assetManager);
     }
 
