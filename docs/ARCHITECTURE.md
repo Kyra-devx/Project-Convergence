@@ -53,6 +53,7 @@ The overlay is a transparent Android View above the GLSurfaceView. It captures t
 - Camera.h / Camera.cpp: native camera position, yaw, pitch, front vector, look processing, movement, view matrix, and perspective matrix.
 - native-lib.cpp: JNI boundary, GL shader setup, generated terrain mesh upload, input synchronization, delta-time loop, camera updates, and draw call.
 - WorldGenerator.h / WorldGenerator.cpp: seeded height/detail noise, vertical chunk section data, surface layers, and terrain-height sampling.
+- ChunkManager.h / ChunkManager.cpp: signed X/Z chunk coordinates, incremental loading/unloading, vertical section ownership, neighbor lookup, mesh invalidation, and merged CPU geometry.
 
 ### app/src/main/assets/shaders/
 
@@ -110,9 +111,9 @@ The overlay visual is a simple touch indicator, not an interactive HUD system. S
 
 Chunk stores 16 × 16 × 16 block IDs. Block ID 0 is air; the prototype also defines grass (1), dirt (2), and stone (3).
 
-The CPU-side mesher skips air, checks six axis-aligned neighbors, omits internal faces adjacent to another solid block in the same chunk, and emits two triangles for each exposed face. Vertices contain position, normal, and RGB color.
+The CPU-side mesher skips air, checks six axis-aligned neighbors, omits internal faces adjacent to another solid block, and emits two triangles for each exposed face. An optional neighbor lookup supplies blocks outside the current 16³ section, allowing culling across horizontal chunk boundaries and between vertical terrain sections. Vertices contain position, normal, and RGB color.
 
-Faces at chunk boundaries remain visible because adjacent-chunk data is not available yet. Neighbor-aware culling is part of B.5. B.4 replaces the stepped sample with FastNoiseLite heightmap and detail noise. The generator fills vertical 16³ sections and assigns stone, dirt, and grass layers. The prototype renders five vertical sections for the X/Z chunk column (0, 0); horizontal chunk streaming remains B.5. Biome noise is initialized but not yet applied, and the seed is a runtime constant rather than persisted world metadata.
+When a neighboring column is not loaded, its blocks are treated as air; when it becomes available or is unloaded, the affected columns are remeshed. B.4 uses FastNoiseLite heightmap and detail noise, filling five vertical 16³ sections per X/Z column with stone, dirt, and grass layers. B.5 loads nearest missing X/Z columns incrementally and unloads columns outside the view-distance-plus-hysteresis threshold. A view distance of 4 targets 81 columns (405 cubic sections).
 
 ## 9. Rendering Pipeline
 
@@ -126,7 +127,7 @@ Initial Android baseline: OpenGL ES 3.0.
 6. Calculate projection × view matrix and upload uMVP.
 7. Issue one glDrawArrays(GL_TRIANGLES, ...) for the demo chunk.
 
-Depth testing and back-face culling remain enabled. Face winding is checked by native tests. The current renderer combines the generated vertical sections into one CPU vertex array, uploads one VAO/VBO pair, and issues one draw call. It does not yet include horizontal chunk streaming, neighbor-aware chunk culling, frustum culling, greedy meshing, transparent passes, or chunk batching.
+Depth testing and back-face culling remain enabled. Face winding is checked by native tests. ChunkManager maintains per-column CPU meshes and combines them only when its mesh revision changes. The renderer uploads the merged mesh to a reusable VAO/VBO using GL_DYNAMIC_DRAW and issues one draw call. It does not yet include worker-thread generation, frustum culling, greedy meshing, transparent passes, or level-of-detail selection.
 
 ## 10. Persistence, Compatibility, Security
 
@@ -140,7 +141,7 @@ Do not commit secrets, signing keys, local config, or personal data. Treat world
 
 Portable CMake/CTest: voxel bounds, chunk meshing, and seeded world generation. World-generation tests cover same-seed determinism, different-seed variation, surface material layers, vertical section placement, and air above terrain.
 
-Android: Gradle app module, CMake native build, emulator/device smoke test, multi-touch test, pause/resume, and EGL surface recreation. Device verification is distinct from source-level implementation and must be recorded separately.
+Android: Gradle app module, CMake native build, emulator/device smoke test, multi-touch test, pause/resume, EGL surface recreation, and profiling while the 81-column view is populated and the player crosses chunk boundaries. Device verification is distinct from source-level implementation and must be recorded separately.
 
 CI should pin tool versions, cache dependencies safely, run formatting/native tests, and build the Android APK. A green compile job is not a substitute for runtime testing on devices.
 

@@ -47,12 +47,12 @@ constexpr std::array<FaceCorners, 6> kFaceCorners{{
       {{0.0F, 0.0F, 0.0F}},
       {{1.0F, 0.0F, 0.0F}},
       {{1.0F, 0.0F, 1.0F}}}},
-    // -Z (ordered counter-clockwise from outside the face)
+    // -Z
     {{{{1.0F, 0.0F, 0.0F}},
       {{0.0F, 0.0F, 0.0F}},
       {{0.0F, 1.0F, 0.0F}},
       {{1.0F, 1.0F, 0.0F}}}},
-    // +Z (ordered counter-clockwise from outside the face)
+    // +Z
     {{{{0.0F, 0.0F, 1.0F}},
       {{1.0F, 0.0F, 1.0F}},
       {{1.0F, 1.0F, 1.0F}},
@@ -81,7 +81,6 @@ constexpr std::array<FaceCorners, 6> kFaceCorners{{
 }  // namespace
 
 Chunk::Chunk() {
-    // Reserve the outer surface of a solid chunk; irregular terrain can grow as needed.
     mesh_vertices_.reserve(6U * kSize * kSize * 6U);
 }
 
@@ -98,7 +97,8 @@ std::uint8_t Chunk::block_at(int x, int y, int z) const noexcept {
     return blocks_[index_of(x, y, z)];
 }
 
-bool Chunk::set_block(int x, int y, int z, std::uint8_t block) noexcept {
+bool Chunk::set_block(int x, int y, int z,
+                      std::uint8_t block) noexcept {
     if (!contains(x, y, z)) {
         return false;
     }
@@ -106,7 +106,7 @@ bool Chunk::set_block(int x, int y, int z, std::uint8_t block) noexcept {
     return true;
 }
 
-void Chunk::build_mesh() {
+void Chunk::build_mesh(const NeighborLookup& neighbor_lookup) {
     mesh_vertices_.clear();
 
     constexpr std::array<std::array<std::size_t, 3>, 2> kTriangles{{
@@ -127,10 +127,14 @@ void Chunk::build_mesh() {
                     const int ny = y + kNeighborOffsets[face][1];
                     const int nz = z + kNeighborOffsets[face][2];
 
-                    // Out-of-chunk neighbors are treated as air in this
-                    // single-chunk prototype. Neighbor chunk data will be
-                    // consulted when chunk streaming is implemented.
-                    if (contains(nx, ny, nz) && block_at(nx, ny, nz) != kAir) {
+                    std::uint8_t neighbor = kAir;
+                    if (contains(nx, ny, nz)) {
+                        neighbor = block_at(nx, ny, nz);
+                    } else if (neighbor_lookup) {
+                        neighbor = neighbor_lookup(nx, ny, nz);
+                    }
+
+                    if (neighbor != kAir) {
                         continue;
                     }
 
@@ -145,12 +149,8 @@ void Chunk::build_mesh() {
                                 static_cast<float>(x) + corner[0],
                                 static_cast<float>(y) + corner[1],
                                 static_cast<float>(z) + corner[2],
-                                normal[0],
-                                normal[1],
-                                normal[2],
-                                color[0],
-                                color[1],
-                                color[2],
+                                normal[0], normal[1], normal[2],
+                                color[0], color[1], color[2],
                             });
                         }
                     }

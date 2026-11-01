@@ -5,6 +5,7 @@
 #include <jni.h>
 
 #include "Camera.h"
+#include "ChunkManager.h"
 #include "WorldGenerator.h"
 #include "convergence/chunk.hpp"
 
@@ -13,6 +14,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -27,8 +29,10 @@ constexpr char kLogTag[] = "ProjectConvergence";
 constexpr float kMaxDeltaTimeSeconds = 0.1F;
 
 std::unique_ptr<WorldGenerator> g_world_generator;
-std::vector<convergence::Vertex> g_world_vertices;
+std::unique_ptr<ChunkManager> g_chunk_manager;
 std::unique_ptr<Camera> g_camera;
+std::uint64_t g_uploaded_mesh_revision =
+    std::numeric_limits<std::uint64_t>::max();
 
 GLuint g_program = 0;
 GLuint g_vao = 0;
@@ -178,99 +182,45 @@ GLuint create_program(AAssetManager* manager) {
     return 0;
 }
 
-void build_generated_world(std::int64_t seed) {
-    g_world_generator = std::make_unique<WorldGenerator>(seed);
-    g_world_vertices.clear();
-
-    constexpr int kVerticalChunkCount =
-        (WorldGenerator::MAX_TERRAIN_HEIGHT +
-         convergence::Chunk::kSize - 1) / convergence::Chunk::kSize;
-    std::array<std::uint8_t, convergence::Chunk::kBlockCount> blocks{};
-
-    // B.4 renders one X/Z chunk column. Extra Y sections expose the surface
-    // above Y=16; horizontal chunk streaming remains part of B.5.
-    for (int chunkY = 0; chunkY < kVerticalChunkCount; ++chunkY) {
-        g_world_generator->generateChunk(0, chunkY, 0, blocks.data());
-        convergence::Chunk chunk;
-
-        for (int x = 0; x < convergence::Chunk::kSize; ++x) {
-            for (int y = 0; y < convergence::Chunk::kSize; ++y) {
-                for (int z = 0; z < convergence::Chunk::kSize; ++z) {
-                    const std::size_t index =
-                        (static_cast<std::size_t>(x) *
-                             convergence::Chunk::kSize + y) *
-                            convergence::Chunk::kSize + z;
-                    const std::uint8_t block = blocks[index];
-                    if (block != convergence::Chunk::kAir) {
-                        (void)chunk.set_block(x, y, z, block);
-                    }
-                }
-            }
-        }
-
-        chunk.build_mesh();
-        const float yOffset = static_cast<float>(
-            chunkY * convergence::Chunk::kSize);
-        const auto& localVertices = chunk.mesh_vertices();
-
-        // The mesher treats missing neighbor chunks as air. Remove only the
-        // horizontal faces between contiguous vertical sections so no flat
-        // internal planes remain in the rendered terrain.
-        for (std::size_t face = 0; face + 5U < localVertices.size(); face += 6U) {
-            const convergence::Vertex& first = localVertices[face];
-            if (first.ny != 0.0F) {
-                const float planeY = first.y + yOffset;
-                const int boundaryY = static_cast<int>(planeY);
-                if (planeY == static_cast<float>(boundaryY) &&
-                    boundaryY > 0 &&
-                    boundaryY % convergence::Chunk::kSize == 0) {
-                    float centerX = 0.0F;
-                    float centerZ = 0.0F;
-                    for (std::size_t i = 0; i < 6U; ++i) {
-                        centerX += localVertices[face + i].x / 6.0F;
-                        centerZ += localVertices[face + i].z / 6.0F;
-                    }
-                    const float terrainHeight =
-                        g_world_generator->getTerrainHeight(centerX, centerZ);
-                    if (static_cast<float>(boundaryY) < terrainHeight) {
-                        continue;
-                    }
-                }
-            }
-
-            for (std::size_t i = 0; i < 6U; ++i) {
-                convergence::Vertex worldVertex = localVertices[face + i];
-                worldVertex.y += yOffset;
-                g_world_vertices.push_back(worldVertex);
-            }
-        }
+bool upload_chunk_mesh() {
+    if (g_chunk_manager == nullptr) {
+        return false;
     }
 
-    __android_log_print(
-        ANDROID_LOG_INFO, kLogTag,
-        "Generated terrain seed=%lld: %zu visible faces, %zu vertices across %d vertical sections.",
-        static_cast<long long>(seed), g_world_vertices.size() / 6U,
-        g_world_vertices.size(), kVerticalChunkCount);
-}
-
-void upload_chunk_mesh() {
-    if (g_world_vertices.empty()) {
-        log_error("Cannot upload an empty chunk mesh.");
-        return;
+    const std::vector<convergence::Vertex>& vertices =
+        g_chunk_manager->mesh_vertices();
+    if (vertices.size() >
+        static_cast<std::size_t>(std::numeric_limits<GLsizei>::max())) {
+        log_error("Chunk mesh exceeds the OpenGL draw vertex-count limit.");
+        g_vertex_count = 0;
+        return false;
     }
 
-    const std::vector<convergence::Vertex>& vertices = g_world_vertices;
+    if (g_vao == 0) {
+        glGenVertexArrays(1, &g_vao);
+    }
+    if (g_vbo == 0) {
+        glGenBuffers(1, &g_vbo);
+    }
+    if (g_vao == 0 || g_vbo == 0) {
+        log_error("Failed to create the streaming terrain VAO/VBO.");
+        g_vertex_count = 0;
+        return false;
+    }
+    if (vertices.size() > static_cast<std::size_t>(
+            std::numeric_limits<GLsizeiptr>::max()) / sizeof(convergence::Vertex)) {
+        log_error("Chunk mesh exceeds the OpenGL buffer-size limit.");
+        g_vertex_count = 0;
+        return false;
+    }
 
-    glGenVertexArrays(1, &g_vao);
     glBindVertexArray(g_vao);
-
-    glGenBuffers(1, &g_vbo);
     glBindBuffer(GL_ARRAY_BUFFER, g_vbo);
     glBufferData(
         GL_ARRAY_BUFFER,
         static_cast<GLsizeiptr>(vertices.size() * sizeof(convergence::Vertex)),
-        vertices.data(),
-        GL_STATIC_DRAW
+        vertices.empty() ? nullptr : vertices.data(),
+        GL_DYNAMIC_DRAW
     );
 
     glVertexAttribPointer(
@@ -293,11 +243,7 @@ void upload_chunk_mesh() {
 
     glBindVertexArray(0);
     g_vertex_count = static_cast<GLsizei>(vertices.size());
-
-    if (g_vao == 0 || g_vbo == 0) {
-        log_error("Failed to create the chunk VAO/VBO.");
-        g_vertex_count = 0;
-    }
+    return true;
 }
 
 }  // namespace
@@ -324,8 +270,9 @@ Java_com_convergence_voxel_VoxelRenderer_nativeCleanup(
     g_mvp_location = -1;
     g_vertex_count = 0;
     g_last_frame_time_ms.store(0);
+    g_chunk_manager.reset();  // Release chunk columns before their generator.
     g_world_generator.reset();
-    std::vector<convergence::Vertex>().swap(g_world_vertices);
+    g_uploaded_mesh_revision = std::numeric_limits<std::uint64_t>::max();
     g_camera.reset();
 
     std::lock_guard<std::mutex> lock(g_input_mutex);
@@ -346,6 +293,9 @@ Java_com_convergence_voxel_VoxelRenderer_nativeInit(
     g_vertex_count = 0;
     g_mvp_location = -1;
     g_last_frame_time_ms.store(0);
+    g_chunk_manager.reset();
+    g_world_generator.reset();
+    g_uploaded_mesh_revision = std::numeric_limits<std::uint64_t>::max();
 
     {
         std::lock_guard<std::mutex> lock(g_input_mutex);
@@ -383,8 +333,13 @@ Java_com_convergence_voxel_VoxelRenderer_nativeInit(
         return;
     }
 
-    build_generated_world(12345);
-    upload_chunk_mesh();
+    constexpr std::int64_t kWorldSeed = 12345;
+    g_world_generator = std::make_unique<WorldGenerator>(kWorldSeed);
+    g_chunk_manager = std::make_unique<ChunkManager>(
+        *g_world_generator, 4, ChunkManager::kDefaultLoadBudgetPerUpdate);
+    __android_log_print(ANDROID_LOG_INFO, kLogTag,
+                        "Chunk streaming initialized: seed=%lld, viewDistance=4.",
+                        static_cast<long long>(kWorldSeed));
 }
 
 extern "C" JNIEXPORT void JNICALL
@@ -444,8 +399,8 @@ Java_com_convergence_voxel_VoxelRenderer_nativeRender(
 ) {
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-    if (g_program == 0 || g_vao == 0 || g_vertex_count <= 0 ||
-        g_camera == nullptr || g_world_generator == nullptr) {
+    if (g_program == 0 || g_camera == nullptr ||
+        g_world_generator == nullptr || g_chunk_manager == nullptr) {
         return;
     }
 
@@ -469,6 +424,19 @@ Java_com_convergence_voxel_VoxelRenderer_nativeRender(
     g_camera->processMovement(
         input.joy_forward, input.joy_strafe, delta_time,
         *g_world_generator);
+
+    // Load the nearest missing columns incrementally to limit frame spikes.
+    g_chunk_manager->update(g_camera->position.x, g_camera->position.z);
+    const std::uint64_t currentMeshRevision =
+        g_chunk_manager->mesh_revision();
+    if (currentMeshRevision != g_uploaded_mesh_revision) {
+        if (upload_chunk_mesh()) {
+            g_uploaded_mesh_revision = currentMeshRevision;
+        }
+    }
+    if (g_vao == 0 || g_vertex_count <= 0) {
+        return;
+    }
 
     const float safe_aspect = std::max(aspect, 0.001F);
     const glm::mat4 mvp =

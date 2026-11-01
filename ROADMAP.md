@@ -71,10 +71,17 @@ Status describes repository evidence. A checked item means the corresponding cod
 
 ### B.5 — Chunk Streaming
 
-- [ ] Neighbor-aware face culling across chunk boundaries
-- [ ] Chunk loading and unloading
-- [ ] Chunk revision tracking and mesh invalidation
-- [ ] Async mesh generation with safe GPU upload scheduling
+- [x] ChunkManager keyed by signed X/Z chunk coordinates
+- [x] Load chunks around the player and unload distant chunks with hysteresis
+- [x] Incremental nearest-first loading budget per frame
+- [x] Neighbor-aware face culling across X/Z boundaries
+- [x] Neighbor-aware culling between the five vertical terrain sections
+- [x] Rebuild adjacent meshes when a neighbor loads or unloads
+- [x] CPU-only chunk ownership with RAII and one renderer-owned merged GPU mesh
+- [x] Mesh revision tracking and GL buffer refresh on world changes
+- [ ] Async chunk generation and mesh builds on worker threads (deferred to B.6)
+
+**B.5 limitations:** generation and meshing are still synchronous on the GL render thread, with two X/Z columns loaded per update to limit spikes. A view distance of 4 represents 81 X/Z columns and five vertical sections per column (405 cubic sections). This prototype does not prove an infinite world, stable 60 FPS, or low-end device performance; profiling and device validation remain pending.
 
 ## Phase C — Redstone Simulation
 

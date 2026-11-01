@@ -16,7 +16,6 @@ std::array<float, 3> cross(const convergence::Vertex& a,
     const float ac_x = c.x - a.x;
     const float ac_y = c.y - a.y;
     const float ac_z = c.z - a.z;
-
     return {{
         ab_y * ac_z - ab_z * ac_y,
         ab_z * ac_x - ab_x * ac_z,
@@ -29,37 +28,31 @@ std::array<float, 3> cross(const convergence::Vertex& a,
 int main() {
     using convergence::Chunk;
 
-    // Empty chunk: no geometry.
     Chunk empty;
     empty.build_mesh();
     assert(empty.mesh_vertices().empty());
     assert(empty.visible_face_count() == 0U);
 
-    // One block: six exposed faces, two triangles per face.
     Chunk single;
     assert(single.set_block(4, 4, 4, Chunk::kStone));
     single.build_mesh();
     assert(single.visible_face_count() == 6U);
     assert(single.mesh_vertices().size() == 36U);
 
-    // Every triangle must wind in the same direction as its declared normal.
-    const auto& single_vertices = single.mesh_vertices();
+    const auto& singleVertices = single.mesh_vertices();
     for (std::size_t face = 0; face < 6U; ++face) {
         const std::size_t first = face * 6U;
         const auto winding = cross(
-            single_vertices[first],
-            single_vertices[first + 1U],
-            single_vertices[first + 2U]
-        );
-        const auto& normal = single_vertices[first];
-        const float normal_dot_winding =
+            singleVertices[first], singleVertices[first + 1U],
+            singleVertices[first + 2U]);
+        const auto& normal = singleVertices[first];
+        const float dot =
             winding[0] * normal.nx +
             winding[1] * normal.ny +
             winding[2] * normal.nz;
-        assert(normal_dot_winding > 0.0F);
+        assert(dot > 0.0F);
     }
 
-    // Two adjacent blocks: the shared pair of faces is removed.
     Chunk pair;
     assert(pair.set_block(0, 0, 0, Chunk::kGrass));
     assert(pair.set_block(1, 0, 0, Chunk::kDirt));
@@ -67,7 +60,6 @@ int main() {
     assert(pair.visible_face_count() == 10U);
     assert(pair.mesh_vertices().size() == 60U);
 
-    // A completely solid 16^3 chunk exposes only its six outer surfaces.
     Chunk solid;
     for (int x = 0; x < Chunk::kSize; ++x) {
         for (int y = 0; y < Chunk::kSize; ++y) {
@@ -77,22 +69,31 @@ int main() {
         }
     }
     solid.build_mesh();
-
-    constexpr std::size_t kExpectedVisibleFaces =
+    constexpr std::size_t kExpectedFaces =
         6U * Chunk::kSize * Chunk::kSize;
-    assert(solid.visible_face_count() == kExpectedVisibleFaces);
-    assert(solid.mesh_vertices().size() == kExpectedVisibleFaces * 6U);
+    assert(solid.visible_face_count() == kExpectedFaces);
+    assert(solid.mesh_vertices().size() == kExpectedFaces * 6U);
+    assert(Chunk::kBlockCount * 6U * 2U == 49152U);
+    assert(kExpectedFaces * 2U == 3072U);
 
-    constexpr std::size_t kNaiveTriangleCount =
-        Chunk::kBlockCount * 6U * 2U;
-    constexpr std::size_t kCulledTriangleCount =
-        kExpectedVisibleFaces * 2U;
-    assert(kNaiveTriangleCount == 49152U);
-    assert(kCulledTriangleCount == 3072U);
+    // A neighbor at +X suppresses only the shared boundary face.
+    Chunk boundary;
+    assert(boundary.set_block(15, 4, 8, Chunk::kStone));
+    boundary.build_mesh(
+        [](int x, int y, int z) -> std::uint8_t {
+            return (x == 16 && y == 4 && z == 8)
+                ? Chunk::kStone
+                : Chunk::kAir;
+        });
+    assert(boundary.visible_face_count() == 5U);
 
-    // Out-of-range writes are rejected; reads outside the chunk are air.
+    // A missing neighbor remains air, preserving edge visibility while streaming.
+    Chunk edge;
+    assert(edge.set_block(0, 4, 8, Chunk::kStone));
+    edge.build_mesh();
+    assert(edge.visible_face_count() == 6U);
+
     assert(!single.set_block(-1, 0, 0, Chunk::kStone));
     assert(single.block_at(-1, 0, 0) == Chunk::kAir);
-
     return 0;
 }

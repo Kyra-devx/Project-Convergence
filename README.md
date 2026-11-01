@@ -31,7 +31,7 @@ Mengeksplorasi arsitektur voxel yang memadukan kedalaman mekanik, runtime native
 | **B.2 Face culling + lighting** | Implementasi awal tersedia | Mesher 16³, normals, shader, VAO/VBO, dan tes native |
 | **B.3 First-person + touch** | Implementasi awal tersedia | Camera GLM, yaw/pitch, delta-time movement, multi-touch, dan virtual joystick; device verification pending |
 | **B.4 World generation** | Implementasi prototipe tersedia | FastNoiseLite height/detail noise, seeded terrain, vertical chunk sections, gravity, dan floor collision; biome application, save persistence, serta horizontal streaming belum tersedia |
-| **B.5 Chunk streaming** | Direncanakan | Neighbor-aware meshing, chunk loading/unloading |
+| **B.5 Chunk streaming** | Implementasi prototipe tersedia | Radius chunk dinamis, culling tetangga, load bertahap, unload hysteresis, mesh revision dan GPU buffer refresh; worker threads dan device profiling belum tersedia |
 | **C. Redstone Engine** | Direncanakan | Scheduler deterministik, update order, dan test suite |
 | **D. Combat System** | Direncanakan | Timing, shield, damage model, dan kontrol sentuh |
 | **E. Compatibility Layer** | Riset | Parser serta adapter berbasis subset; bukan janji menjalankan semua mod Java |
@@ -100,8 +100,9 @@ Kontrol ini belum mencakup collision, gravity, jump, sprint, touch sensitivity s
 │       │   ├── VoxelGLSurfaceView.java
 │       │   └── TouchControlsOverlay.java
 │       ├── cpp/
-│       │   ├── Camera.h
-│       │   ├── Camera.cpp
+│       │   ├── Camera.h / Camera.cpp
+│       │   ├── WorldGenerator.h / WorldGenerator.cpp
+│       │   ├── ChunkManager.h / ChunkManager.cpp
 │       │   └── native-lib.cpp
 │       ├── assets/shaders/
 │       └── res/
@@ -120,7 +121,7 @@ cd Project-Convergence
 
 Buka folder repository di Android Studio, pasang SDK/NDK/CMake yang diminta, lalu lakukan Gradle Sync dan jalankan konfigurasi app. Gradle Wrapper belum disertakan; Android Studio atau instalasi Gradle lokal diperlukan sampai wrapper resmi ditambahkan.
 
-Saat runtime berhasil, demo menampilkan terrain berbukit hasil seed 12345 pada satu kolom chunk X/Z (16 × 16) dengan beberapa section vertikal. Seret di kanan untuk mengubah arah pandang, dan gunakan joystick kiri untuk bergerak. Kamera mendapat gravity dan floor collision berbasis heightmap. Horizontal chunk streaming, biome, save persistence, Android build, dan pengujian perangkat masih belum diverifikasi.
+Saat runtime berhasil, demo memuat terrain procedural di sekitar pemain dengan seed 12345 dan view distance 4. Kolom chunk dimuat bertahap dua per frame dan dibongkar setelah melewati radius dengan hysteresis. Culling lintas batas diterapkan saat tetangga tersedia. Gravity dan floor collision memakai heightmap yang sama. Worker-thread generation, biome, save persistence, Android build, dan pengujian perangkat masih belum diverifikasi.
 
 ## Dokumentasi
 

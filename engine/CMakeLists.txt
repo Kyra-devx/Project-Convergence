@@ -38,4 +38,15 @@ if(BUILD_TESTING)
     target_include_directories(world_generator_test PRIVATE ${WORLD_GENERATOR_DIR})
     target_compile_features(world_generator_test PRIVATE cxx_std_17)
     add_test(NAME world_generator_test COMMAND world_generator_test)
+
+    add_executable(
+        chunk_manager_test
+        tests/chunk_manager_test.cpp
+        ${WORLD_GENERATOR_DIR}/WorldGenerator.cpp
+        ${WORLD_GENERATOR_DIR}/ChunkManager.cpp
+    )
+    target_include_directories(chunk_manager_test PRIVATE ${WORLD_GENERATOR_DIR})
+    target_link_libraries(chunk_manager_test PRIVATE convergence_engine)
+    target_compile_features(chunk_manager_test PRIVATE cxx_std_17)
+    add_test(NAME chunk_manager_test COMMAND chunk_manager_test)
 endif()
