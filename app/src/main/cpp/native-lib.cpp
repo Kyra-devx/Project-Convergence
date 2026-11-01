@@ -307,8 +307,11 @@ void update_camera(int width, int height) {
                          static_cast<float>(height);
     const auto projection = perspective(50.0F * kPi / 180.0F, aspect,
                                         0.1F, 100.0F);
+    const float camera_scale = aspect < 0.85F ? 1.25F : 1.0F;
     const auto view = look_at(
-        {23.0F, 18.0F, 27.0F},
+        {8.0F + 15.0F * camera_scale,
+         4.0F + 14.0F * camera_scale,
+         8.0F + 19.0F * camera_scale},
         {8.0F, 4.0F, 8.0F},
         {0.0F, 1.0F, 0.0F}
     );

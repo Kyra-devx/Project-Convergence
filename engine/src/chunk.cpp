@@ -81,7 +81,8 @@ constexpr std::array<FaceCorners, 6> kFaceCorners{{
 }  // namespace
 
 Chunk::Chunk() {
-    mesh_vertices_.reserve(kBlockCount * 36U);
+    // Reserve the outer surface of a solid chunk; irregular terrain can grow as needed.
+    mesh_vertices_.reserve(6U * kSize * kSize * 6U);
 }
 
 bool Chunk::contains(int x, int y, int z) const noexcept {

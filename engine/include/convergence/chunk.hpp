@@ -19,6 +19,9 @@ struct Vertex {
     float b;
 };
 
+static_assert(sizeof(Vertex) == sizeof(float) * 9U,
+              "Vertex attributes must remain tightly packed.");
+
 class Chunk final {
 public:
     static constexpr int kSize = 16;
