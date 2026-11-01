@@ -121,11 +121,11 @@ Initial Android baseline: OpenGL ES 3.0.
 
 1. Read vertex/fragment shader assets.
 2. Compile and link shader program.
-3. Build the demo chunk mesh and upload it using GL_STATIC_DRAW.
-4. Bind position, normal, and color attributes into one VAO.
-5. On each frame, update Camera using look delta and joystick state.
-6. Calculate projection × view matrix and upload uMVP.
-7. Issue one glDrawArrays(GL_TRIANGLES, ...) for the demo chunk.
+3. Initialize WorldGenerator and ChunkManager; load nearby X/Z columns incrementally.
+4. Build CPU meshes with neighbor-aware face culling across X/Z and vertical section boundaries.
+5. Bind position, normal, and color attributes into one reusable VAO/VBO.
+6. On each frame, update Camera and ChunkManager; refresh the merged GPU buffer with GL_DYNAMIC_DRAW only when the mesh revision changes.
+7. Calculate projection × view matrix, upload uMVP, and draw the merged loaded terrain in one call.
 
 Depth testing and back-face culling remain enabled. Face winding is checked by native tests. ChunkManager maintains per-column CPU meshes and combines them only when its mesh revision changes. The renderer uploads the merged mesh to a reusable VAO/VBO using GL_DYNAMIC_DRAW and issues one draw call. It does not yet include worker-thread generation, frustum culling, greedy meshing, transparent passes, or level-of-detail selection.
 

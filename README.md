@@ -67,7 +67,7 @@ Mesher menghasilkan geometri hanya untuk face blok yang menghadap udara atau ber
 
 Untuk chunk solid 16³, naive meshing menghasilkan 49.152 triangle, sedangkan face culling menghasilkan 3.072 triangle pada enam permukaan luar. Ini adalah kasus uji solid penuh, bukan klaim performa untuk semua terrain.
 
-Batas saat ini: neighbor di luar chunk diperlakukan sebagai udara. Neighbor-aware occlusion lintas chunk menunggu chunk manager.
+Batas saat ini: neighbor yang belum dimuat diperlakukan sebagai udara. Saat chunk tetangga dimuat atau dibongkar, mesh kolom terkait dibangun ulang agar face di batas chunk ikut di-culling.
 
 ## Fase B.3 — First-person camera dan touch controls
 
@@ -80,7 +80,7 @@ Batas saat ini: neighbor di luar chunk diperlakukan sebagai udara. Neighbor-awar
 - Gerakan berjalan pada bidang horizontal; pitch kamera tidak membuat joystick mengangkat atau menenggelamkan pemain.
 - Overlay menampilkan basis dan knob joystick saat pointer kiri aktif.
 
-Kontrol ini belum mencakup collision, gravity, jump, sprint, touch sensitivity settings, atau gesture customization. Build Android dan pemeriksaan input di perangkat fisik tetap perlu diverifikasi.
+Kontrol ini kini mencakup gravity dasar dan floor collision berbasis heightmap. Jump, sprint, touch sensitivity settings, dan gesture customization belum tersedia. Build Android dan pemeriksaan input di perangkat fisik tetap perlu diverifikasi.
 
 ## Struktur repository
 
