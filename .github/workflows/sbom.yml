@@ -1,0 +1,13 @@
+name: Generate SBOM
+on: [push, workflow_dispatch]
+permissions:
+  contents: write
+jobs:
+  sbom:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: advanced-security/sbom-action@v0
+        with:
+          format: spdx
+          output: sbom.spdx.json
