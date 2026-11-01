@@ -1,0 +1,71 @@
+# Android packages
+*.apk
+*.ap_
+*.aab
+*.aar
+
+# Java / Android generated files
+*.dex
+*.class
+bin/
+gen/
+out/
+
+# Gradle
+.gradle/
+build/
+**/build/
+local.properties
+
+# Android Studio / IntelliJ
+*.iml
+.idea/
+.navigation/
+captures/
+.externalNativeBuild/
+**/.externalNativeBuild/
+.cxx/
+**/.cxx/
+
+# NDK / CMake
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+compile_commands.json
+*.o
+*.obj
+*.so
+*.dylib
+*.dll
+*.lib
+*.a
+
+# Debug and profiling
+*.hprof
+*.prof
+*.trace
+*.symbols
+
+# OS, logs, temporary files
+.DS_Store
+Thumbs.db
+Desktop.ini
+*.log
+*.tmp
+*.swp
+*.swo
+
+# Signing credentials: never commit private keys
+*.jks
+*.keystore
+*.pem
+*.p12
+
+# Local service configuration
+google-services.json
+.env
+.env.*
+
+# Distribution output
+/dist/
+/artifacts/
