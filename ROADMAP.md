@@ -1,6 +1,6 @@
 # Roadmap — Project Convergence
 
-Status describes repository evidence. A checked item means a scaffold or artifact exists; it does not imply device-level or performance validation unless stated.
+Status describes repository evidence. A checked item means the corresponding code or artifact exists; it does not imply device-level, release, or performance validation unless stated.
 
 ## Phase A — Game Design Document
 
@@ -14,17 +14,50 @@ Status describes repository evidence. A checked item means a scaffold or artifac
 
 ## Phase B — Android and Voxel Engine Foundation
 
+### B.1 — Foundation
+
 - [x] Android application scaffold (Min SDK 24)
-- [x] OpenGL ES 3.0 surface and native frame-clear entrypoint
 - [x] JNI lifecycle bridge
+- [x] CMake and native C++17 build configuration
 - [x] Initial standalone voxel data model
-- [ ] Verify Gradle, NDK, and CMake build in CI
-- [ ] Run on physical devices and record GPU compatibility
-- [ ] Face-culling chunk meshing
-- [ ] First-person camera and touch controls
-- [ ] Deterministic noise-based terrain generation
-- [ ] Chunk streaming, loading, and unloading
-- [ ] World persistence and save-file versioning
+
+### B.2 — Face Culling and Basic Lighting
+
+- [x] Chunk data model sized 16 × 16 × 16
+- [x] Skip air blocks during mesh generation
+- [x] Emit faces only when the in-chunk neighbor is air
+- [x] Keep boundary faces visible when neighbor chunk data is unavailable
+- [x] Vertex layout with position, normal, and RGB color
+- [x] Grass, dirt, and stone face colors
+- [x] GLSL ES 3.0 vertex and fragment shaders
+- [x] Directional diffuse lighting with ambient floor
+- [x] VAO/VBO upload with GL_STATIC_DRAW and one draw call for the demo chunk
+- [x] Static demo camera and MVP matrix to frame the block stack
+- [x] Native tests for empty, adjacent, single, and fully solid chunks
+- [x] Winding/normal consistency test for all six face directions
+- [ ] Verify Android Gradle/NDK build in CI
+- [ ] Run and visually inspect on physical Android devices
+
+**B.2 boundary note:** faces on chunk edges are retained because cross-chunk neighbor data is not yet implemented. This avoids holes at exposed edges in a single-chunk scene, but neighboring solid chunks may temporarily produce duplicate internal boundary faces.
+
+### B.3 — Camera and Input
+
+- [ ] First-person camera
+- [ ] Touch look and movement controls
+- [ ] Camera collision and sensitivity settings
+
+### B.4 — World Generation
+
+- [ ] Deterministic terrain noise
+- [ ] Biome selection and terrain shaping
+- [ ] Seed/version persistence
+
+### B.5 — Chunk Streaming
+
+- [ ] Neighbor-aware face culling across chunk boundaries
+- [ ] Chunk loading and unloading
+- [ ] Chunk revision tracking and mesh invalidation
+- [ ] Async mesh generation with safe GPU upload scheduling
 
 ## Phase C — Redstone Simulation
 

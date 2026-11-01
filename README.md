@@ -27,7 +27,11 @@ Mengeksplorasi arsitektur voxel yang memadukan kedalaman mekanik, runtime native
 | Fase | Status | Ringkasan |
 |---|---|---|
 | **A. Game Design Document** | Draft v0.1 tersedia | Visi, mekanik inti, combat, hardcore, dan world generation didokumentasikan |
-| **B. Voxel Engine Prototype** | Scaffold awal | Modul Android, GL ES 3.0 surface, JNI bridge, dan pustaka data voxel awal; belum diverifikasi pada perangkat |
+| **B.1 Engine foundation** | Scaffold tersedia | Modul Android, JNI bridge, CMake, dan data model voxel |
+| **B.2 Face culling + lighting** | Implementasi awal tersedia | Mesher 16³, normals per face, shader GLSL, VAO/VBO, camera MVP, draw call, dan tes native; Android device belum diverifikasi |
+| **B.3 Camera + touch** | Direncanakan | Kontrol first-person dan input sentuh |
+| **B.4 World generation** | Direncanakan | Terrain noise dan biome |
+| **B.5 Chunk streaming** | Direncanakan | Neighbor-aware meshing, chunk loading/unloading |
 | **C. Redstone Engine** | Direncanakan | Scheduler deterministik, update order, dan test suite |
 | **D. Combat System** | Direncanakan | Timing, shield, damage model, dan kontrol sentuh |
 | **E. Compatibility Layer** | Riset | Parser serta adapter berbasis subset; bukan janji menjalankan semua mod Java |
@@ -41,17 +45,27 @@ Lihat [ROADMAP.md](ROADMAP.md) untuk status yang lebih rinci.
 ┌──────────────────────────────────────────────────┐
 │ Android Application: UI · Lifecycle · Touch      │
 ├──────────────────────────────────────────────────┤
-│ JNI Boundary: Validation · Ownership · Threading │
+│ JNI Boundary: Asset loading · Surface lifecycle  │
 ├──────────────────────────────────────────────────┤
-│ Native C++ Runtime: World · Simulation · Combat  │
+│ Native C++ Engine: Chunk data · Face culling     │
 ├──────────────────────────────────────────────────┤
-│ Rendering: OpenGL ES 3.0 baseline · Vulkan later │
+│ OpenGL ES 3.0: Shader · VAO/VBO · Depth testing  │
 ├──────────────────────────────────────────────────┤
 │ Android Platform: Min SDK 24                     │
 └──────────────────────────────────────────────────┘
 ~~~~
 
-**Stack awal:** Java (Android SDK), C++ (Android NDK), OpenGL ES 3.0, JNI, dan CMake. Vulkan merupakan jalur eksplorasi lanjutan, bukan dependensi prototipe saat ini. Ray tracing tidak diasumsikan tersedia di seluruh perangkat Android.
+**Stack awal:** Java (Android SDK), C++17 (Android NDK), OpenGL ES 3.0, GLSL ES 3.0, JNI, dan CMake. Vulkan merupakan jalur eksplorasi lanjutan, bukan dependensi prototipe saat ini. Ray tracing tidak diasumsikan tersedia di seluruh perangkat Android.
+
+## Face-culling meshing — Fase B.2
+
+Mesher menghasilkan geometri hanya untuk face blok yang menghadap udara atau berada pada tepi chunk. Face yang berdampingan dengan blok solid di chunk yang sama dihilangkan. Setiap vertex membawa posisi, normal, dan warna; shader fragment menerapkan directional diffuse lighting dengan ambient minimum.
+
+Tes native mencakup chunk kosong, satu blok, dua blok berdampingan, satu chunk solid 16³, dan konsistensi winding terhadap normal.
+
+**Batas saat ini:** neighbor di luar chunk diperlakukan sebagai udara, sehingga face di batas chunk tetap dibuat. Neighbor-aware occlusion akan ditambahkan bersama chunk manager pada fase berikutnya. Persentase face yang tersisa bergantung pada bentuk dan kepadatan world; angka pengurangan bukan jaminan untuk setiap scene.
+
+Untuk chunk 16³ yang seluruhnya solid, naive meshing menghasilkan 49.152 triangle, sedangkan face-culling menghasilkan 3.072 triangle pada enam permukaan luar (6,25% dari jumlah awal). Ini adalah kasus uji solid penuh, bukan klaim performa untuk seluruh terrain.
 
 ## Struktur repository
 
@@ -64,8 +78,15 @@ Lihat [ROADMAP.md](ROADMAP.md) untuk status yang lebih rinci.
 │   └── lore/ANOMALI-KONVERGENSI.md
 ├── app/
 │   ├── build.gradle
-│   └── src/main/{java,cpp,res}/
-├── engine/{include,src}/
+│   └── src/main/
+│       ├── java/com/convergence/voxel/
+│       ├── cpp/
+│       ├── assets/shaders/
+│       └── res/
+├── engine/
+│   ├── include/convergence/
+│   ├── src/
+│   └── tests/
 └── tools/{redstone-test-suite,world-converter}/
 ~~~~
 
@@ -80,7 +101,7 @@ cd Project-Convergence
 
 Buka folder repository di Android Studio, pasang SDK/NDK/CMake yang diminta, lalu lakukan Gradle Sync dan jalankan konfigurasi app. Gradle Wrapper belum disertakan; Android Studio atau instalasi Gradle lokal diperlukan sampai wrapper resmi ditambahkan.
 
-**Batas prototipe saat ini:** scaffold native hanya membuat GL ES 3.0 context dan membersihkan frame. Belum ada renderer blok, chunk meshing, world generation, atau gameplay loop.
+Ketika build dan runtime Android berhasil, demo menampilkan tumpukan voxel bertingkat dengan warna grass/dirt/stone dan directional lighting. Scaffold menyediakan kamera statis untuk framing demo; first-person camera dan touch control masih fase B.3. Android build dan pengujian pada perangkat belum diverifikasi pada commit ini.
 
 ## Dokumentasi
 

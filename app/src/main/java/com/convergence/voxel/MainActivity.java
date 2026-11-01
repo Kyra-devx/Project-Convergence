@@ -1,6 +1,7 @@
 package com.convergence.voxel;
 
 import android.app.Activity;
+import android.content.res.AssetManager;
 import android.opengl.GLSurfaceView;
 import android.os.Bundle;
 import android.view.ViewGroup;
@@ -16,7 +17,7 @@ public final class MainActivity extends Activity {
 
     private GLSurfaceView glSurfaceView;
 
-    private static native void nativeOnSurfaceCreated();
+    private static native void nativeOnSurfaceCreated(AssetManager assetManager);
     private static native void nativeOnSurfaceChanged(int width, int height);
     private static native void nativeOnDrawFrame();
 
@@ -54,10 +55,10 @@ public final class MainActivity extends Activity {
         }
     }
 
-    private static final class ConvergenceRenderer implements GLSurfaceView.Renderer {
+    private final class ConvergenceRenderer implements GLSurfaceView.Renderer {
         @Override
         public void onSurfaceCreated(GL10 unused, EGLConfig config) {
-            nativeOnSurfaceCreated();
+            nativeOnSurfaceCreated(getAssets());
         }
 
         @Override
