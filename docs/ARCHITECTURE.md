@@ -13,148 +13,138 @@ Separate platform lifecycle, native simulation, world data, rendering, and compa
 ## 2. System Overview
 
 ~~~~text
-┌─────────────────────────────────────────────────┐
-│ Android App: Activity · Touch · Lifecycle        │
-└──────────────────────┬──────────────────────────┘
-                       │ Java calls / AssetManager
-┌──────────────────────▼──────────────────────────┐
-│ JNI: Asset loading · Surface lifecycle           │
-└──────────────────────┬──────────────────────────┘
-                       │ Native API
-┌──────────────────────▼──────────────────────────┐
-│ C++: Chunk data · Face-culling mesher            │
-│ World · Simulation · Tick · Redstone             │
-└──────────────────────┬──────────────────────────┘
-                       │ Vertex buffer
-┌──────────────────────▼──────────────────────────┐
-│ OpenGL ES 3.0: Shader · VAO/VBO · Depth/Culling  │
-└─────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────┐
+│ Android Activity + TouchControlsOverlay             │
+│ Left: virtual joystick · Right: camera look         │
+└──────────────────────┬─────────────────────────────┘
+                       │ multi-touch MotionEvent
+┌──────────────────────▼─────────────────────────────┐
+│ VoxelGLSurfaceView + VoxelRenderer                  │
+│ GLSurfaceView.Renderer · frame clock · EGL          │
+└──────────────────────┬─────────────────────────────┘
+                       │ JNI input/render calls
+┌──────────────────────▼─────────────────────────────┐
+│ Mutex-protected input snapshot · native Camera     │
+│ C++ Chunk mesher · delta-time movement · GLM        │
+└──────────────────────┬─────────────────────────────┘
+                       │ MVP + VBO
+┌──────────────────────▼─────────────────────────────┐
+│ OpenGL ES 3.0: GLSL · VAO/VBO · Depth/Culling       │
+└────────────────────────────────────────────────────┘
 ~~~~
-
-The Android path now contains a demo chunk render path and the portable engine contains a CPU mesher. First-person input, general world simulation, streaming, and production rendering features remain future work.
 
 ## 3. Repository Modules
 
 ### app/
 
-Android entry point: Activity lifecycle, UI, touch input, platform permissions, JNI declarations, native library loading, and GL surface lifecycle. The Activity must not own simulation rules or perform expensive world operations on the UI thread.
+Android entry point, lifecycle, platform UI, touch input, and GL surface.
+
+### app/src/main/java/com/convergence/voxel/
+
+- MainActivity creates the game surface and places touch controls above it in a FrameLayout.
+- VoxelGLSurfaceView owns the GLSurfaceView and tracks one left joystick pointer and one right look pointer. The two can be active simultaneously.
+- VoxelRenderer owns GL renderer lifecycle and calls native init, resize, render, and input functions.
+- TouchControlsOverlay draws the floating joystick base/knob and forwards MotionEvents to the surface input controller.
+
+The overlay is a transparent Android View above the GLSurfaceView. It captures the touch stream so the joystick and camera-look gestures are routed consistently.
 
 ### app/src/main/cpp/
 
-Android-specific native bridge and renderer integration. It loads GLSL files from Android assets, compiles/links the shader program, uploads the demo mesh, creates the MVP camera matrix, and issues the OpenGL ES draw call. GL objects must be recreated after EGL context recreation.
+- Camera.h / Camera.cpp: native camera position, yaw, pitch, front vector, look processing, movement, view matrix, and perspective matrix.
+- native-lib.cpp: JNI boundary, GL shader setup, demo chunk mesh upload, input synchronization, delta-time loop, camera updates, and draw call.
 
 ### app/src/main/assets/shaders/
 
-GLSL ES 3.0 vertex and fragment shaders. The vertex layout uses position at location 0, normal at location 1, and RGB color at location 2. The fragment shader applies a directional diffuse term with an ambient minimum.
+GLSL ES 3.0 vertex and fragment shaders. Position, normal, and RGB color use attribute locations 0, 1, and 2.
 
 ### engine/
 
-Portable C++ library with public headers in include/, implementations in src/, native tests in tests/, and a CMake build. VoxelWorld is a separate fixed-width data model; Chunk is the 16³ mesh-generation unit used by the B.2 prototype.
+Portable C++ library with public headers in include/, implementations in src/, native tests in tests/, and CMake build. Chunk is the 16³ CPU mesh-generation unit used by the B.2/B.3 demo.
 
-### tools/
+## 4. Camera
 
-redstone-test-suite/ stores planned behavioral fixtures. world-converter/ documents future format mapping and import/export tooling. Conversion must report unsupported or lossy data.
+Camera uses GLM:
 
-## 4. JNI Boundary
+- position: world-space camera location.
+- yaw: horizontal angle in degrees, initially -90° to face -Z.
+- pitch: vertical angle in degrees, clamped to [-89°, 89°].
+- movementSpeed: world units per second.
+- lookSensitivity: degrees per input pixel.
+- fov: perspective vertical field of view in degrees.
 
-JNI is a platform boundary, not a general-purpose data bus.
+getFrontVector converts yaw/pitch to a normalized direction. getViewMatrix calls glm::lookAt. getProjectionMatrix(aspect) calls glm::perspective with near/far planes 0.1 and 500 world units.
 
-1. Define ownership for every native allocation crossing the boundary.
-2. Validate dimensions, lengths, and nullable inputs.
-3. Keep GL calls on the thread with the current GL context.
-4. Keep Android UI calls on the main thread.
-5. Avoid retaining JNI references longer than required.
-6. Expose coarse-grained operations rather than crossing JNI for every block/vertex.
-7. Handle pause/resume and GL context recreation explicitly.
+The demo initializes the camera just outside the B.2 block structure and aims toward its center. Walking uses the horizontal projection of the front vector, so looking up/down does not cause the movement joystick to fly or sink the camera. Collision, gravity, jump, and terrain height handling remain future work.
 
-MainActivity passes its AssetManager to the GL thread's surface-created callback. Native code uses AAssetManager_fromJava to read shader assets; shader compilation and all GL calls occur while the GLSurfaceView context is current.
+GLM is a header-only C++ dependency fetched by CMake from the exact upstream commit corresponding to release 1.0.1. The initial Android native configure requires network access unless the dependency has already been cached.
 
-## 5. World Data, Chunks, and Mesh Generation
+## 5. JNI Input Boundary and Threading
 
-Chunk stores 16 × 16 × 16 block IDs. Block ID 0 is air; the prototype also defines grass (1), dirt (2), and stone (3). Coordinates outside the chunk read as air.
+Touch events originate on Android's UI thread. nativeHandleLook accumulates relative look deltas; nativeHandleJoystick updates normalized forward/strafe values.
 
-The CPU-side mesher:
+A mutex protects the pending input state. On each GL frame, nativeRender takes a snapshot, clears only the accumulated look deltas, and retains joystick values until release. This prevents UI-thread writes from racing with the GL thread's camera update.
 
-1. Skips air blocks.
-2. Examines six axis-aligned neighbors for each non-air block.
-3. Omits a face when its neighbor inside the same chunk is non-air.
-4. Emits two triangles (six vertices) for each exposed face.
-5. Writes position, face normal, and RGB color into each Vertex.
+All OpenGL calls remain on the thread that owns the current GLSurfaceView EGL context. Native camera updates and rendering also run on that GL thread.
 
-A face at the chunk boundary is retained because adjacent-chunk data is not available yet. When chunk streaming is implemented, a mesher should consult neighbor data so a solid block in an adjacent chunk can occlude the boundary face. Until then, adjacent chunks may generate duplicate internal boundary faces.
+## 6. Game Loop and Delta Time
 
-The 16³ chunk is a rendering prototype, not the final world storage format. Chunk dimensions and vertical world bounds remain design decisions.
+VoxelRenderer.onDrawFrame passes Android uptime in milliseconds to nativeRender.
 
-For a fully solid 16³ chunk, naive meshing emits 16³ × 6 × 2 = 49,152 triangles. This mesher emits only the six outer surfaces: 6 × 16² faces × 2 triangles = 3,072 triangles. Terrain savings depend on geometry and occupancy; no fixed percentage is guaranteed.
+The native loop calculates elapsed seconds from the previous frame. The delta is clamped to [0, 0.1] seconds to prevent large movement jumps after stalls or lifecycle transitions. nativeResetFrameClock resets the atomic frame timestamp during Activity pause/resume.
 
-## 6. Simulation and Determinism
+Movement is multiplied by speed and delta time, so speed is frame-rate independent. Diagonal movement is normalized to avoid moving faster than straight-line joystick input.
 
-Use a fixed logical tick. Rendering may interpolate but must not mutate authoritative gameplay state.
+## 7. Touch Controls
 
-A future scheduler must define event time and priority, stable tie-breaking, neighbor update order, cancellation/deduplication, overload handling, and deterministic random streams.
+The screen is divided into two input zones:
 
-Workers may generate chunks or meshes from immutable snapshots. Return world/chunk revisions so stale jobs can be discarded. Authoritative block updates remain ordered according to the documented simulation model.
+- **Left half:** first eligible pointer owns the floating joystick. Its origin is set at pointer-down; the knob is clamped to a density-scaled radius. The dead zone suppresses accidental drift. Up maps to forward, down to backward, and horizontal offset to strafe.
+- **Right half:** first eligible pointer owns camera look. Pointer movement is sent as relative X/Y deltas.
 
-## 7. Rendering Pipeline
+One pointer per zone is tracked by pointer ID, allowing simultaneous movement and look. Additional pointers in an already-owned zone are ignored. Pointer-up releases only the matching control; ACTION_CANCEL and Activity pause reset all movement values.
+
+The overlay visual is a simple touch indicator, not an interactive HUD system. Sensitivity settings, gesture remapping, button actions, and accessibility options remain future work.
+
+## 8. World Data, Chunks, and Mesh Generation
+
+Chunk stores 16 × 16 × 16 block IDs. Block ID 0 is air; the prototype also defines grass (1), dirt (2), and stone (3).
+
+The CPU-side mesher skips air, checks six axis-aligned neighbors, omits internal faces adjacent to another solid block in the same chunk, and emits two triangles for each exposed face. Vertices contain position, normal, and RGB color.
+
+Faces at chunk boundaries remain visible because adjacent-chunk data is not available yet. Neighbor-aware culling is part of B.5. The demo contains one stepped sample chunk, not a terrain generator or world streamer.
+
+## 9. Rendering Pipeline
 
 Initial Android baseline: OpenGL ES 3.0.
 
-The B.2 demo path:
+1. Read vertex/fragment shader assets.
+2. Compile and link shader program.
+3. Build the demo chunk mesh and upload it using GL_STATIC_DRAW.
+4. Bind position, normal, and color attributes into one VAO.
+5. On each frame, update Camera using look delta and joystick state.
+6. Calculate projection × view matrix and upload uMVP.
+7. Issue one glDrawArrays(GL_TRIANGLES, ...) for the demo chunk.
 
-1. Read shaders/vertex_shader.glsl and shaders/fragment_shader.glsl from Android assets.
-2. Compile and link the shader program.
-3. Generate a stepped block-stack sample (stone, dirt, grass) in a single 16³ chunk.
-4. Build its CPU mesh using face culling.
-5. Upload the interleaved Vertex array to a VBO with GL_STATIC_DRAW.
-6. Configure one VAO: position (location 0), normal (location 1), and color (location 2).
-7. Calculate a fixed perspective/look-at MVP matrix and issue one glDrawArrays(GL_TRIANGLES, ...) call for the demo chunk.
+Depth testing and back-face culling remain enabled. Face winding is checked by native tests. The current renderer uses one static demo chunk and one draw call; it does not yet include frustum culling, greedy meshing, transparent passes, or chunk batching.
 
-The shader uses normalized face normals and a directional light with an ambient floor. Depth testing and back-face culling are enabled. Face winding is tested against declared normals to prevent outward faces from being culled accidentally.
+## 10. Persistence, Compatibility, Security
 
-This is a static demo camera, not the first-person camera or touch-control system in B.3. Transparent geometry, texture atlases, multiple material passes, frustum culling, greedy meshing, occlusion, and multi-chunk batching are future tasks. Benchmark low-, mid-, and high-tier devices before selecting optimization priorities. Add Vulkan only behind an abstraction and only if measured benefits justify complexity.
+Save files need a magic identifier and format version, world generation version and seed, chunk coordinates, block/metadata payloads, integrity checks, and migration rules.
 
-## 8. Threading Model
+Compatibility should use adapters for documented formats, normalize IDs/metadata, validate resource sizes and paths, report unsupported constructs, and restrict extension execution. Direct execution of arbitrary JVM mods from C++ is outside the current architecture.
 
-| Work | Thread ownership |
-|---|---|
-| Android UI and lifecycle | Main/UI thread |
-| OpenGL ES calls | Thread owning current GL context |
-| Authoritative simulation | Single deterministic owner initially |
-| Chunk generation | Worker pool with immutable inputs |
-| CPU mesh generation | Worker pool with immutable snapshots in a future phase |
-| GPU upload/draw | GL thread with current context |
-| File I/O | Dedicated I/O task or worker |
+Do not commit secrets, signing keys, local config, or personal data. Treat worlds, packs, and archives as untrusted. Reject path traversal and oversized decompressed content.
 
-No background task should assume access to an Activity or live GL context. Define cancellation and shutdown for each worker. The B.2 demo currently builds and uploads one mesh during surface initialization; asynchronous mesh scheduling is deferred.
+## 11. Build and Test Strategy
 
-## 9. Persistence
+Portable engine: desktop CMake build and CTest for voxel bounds and chunk meshing. Existing tests cover empty, single, adjacent, solid chunk face counts and winding/normal agreement.
 
-Save files need a magic identifier and format version, world generation version and seed, chunk coordinates, block/metadata payloads, integrity checks, and migration rules. Writes should be atomic where possible. Failed saves must not silently overwrite the last known-good world.
+Android: Gradle app module, CMake native build, emulator/device smoke test, multi-touch test, pause/resume, and EGL surface recreation. Device verification is distinct from source-level implementation and must be recorded separately.
 
-## 10. Compatibility Layer
+CI should pin tool versions, cache dependencies safely, run formatting/native tests, and build the Android APK. A green compile job is not a substitute for runtime testing on devices.
 
-Use adapters that parse documented formats, normalize IDs/metadata, validate resource sizes and paths, report unsupported constructs, and restrict extension execution.
+## 12. Decisions and Open Questions
 
-Direct execution of arbitrary JVM mods from C++ is outside the current architecture. A Java compatibility host, if ever considered, is a separate runtime with its own security and performance review.
-
-## 11. Security and Privacy
-
-Do not commit secrets, signing keys, local config, or personal data. Treat worlds, packs, and archives as untrusted. Reject path traversal and oversized decompressed content. Avoid unrestricted scripts. Keep logs free of personal data and private world content unless explicitly opted in.
-
-Repository policy documents under .github/ remain authoritative for contribution and audit expectations.
-
-## 12. Build and Test Strategy
-
-Android: Gradle app module, CMake native build, device/emulator smoke test, pause/resume and surface-recreation tests. Android build and device runtime validation must be recorded separately from source-level implementation.
-
-Portable engine: desktop CMake build, unit tests for bounds/indexing and chunk meshing, sanitizer runs where supported, and deterministic fixtures once simulation exists.
-
-The chunk_mesher_test validates empty, single-block, adjacent-block, solid-chunk face counts, and winding/normal agreement for all six face directions. CTest runs it alongside voxel_world_test.
-
-CI should pin tool versions, cache safely, run formatting/native tests, and build the Android APK. A green compile job is not a substitute for runtime testing on devices.
-
-## 13. Decisions and Open Questions
-
-Chunk dimensions and vertical bounds; neighbor-chunk data ownership; rendering abstraction; save encoding/compression; tick/update ordering; lighting; network authority; scripting sandbox; and minimum GPU feature set.
+Collision and gravity model; world vertical bounds; chunk dimensions; neighbor-chunk ownership; save encoding/compression; redstone tick/update ordering; multiplayer authority; extension API and sandbox; and minimum GPU feature set.
 
 Record decisions with context, alternatives, consequences, and migration impact.

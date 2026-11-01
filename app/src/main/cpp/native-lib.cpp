@@ -4,28 +4,45 @@
 #include <android/log.h>
 #include <jni.h>
 
+#include "Camera.h"
 #include "convergence/chunk.hpp"
 
-#include <array>
-#include <cmath>
+#include <algorithm>
+#include <atomic>
 #include <cstddef>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <sys/types.h>
 #include <vector>
 
+#include <glm/gtc/type_ptr.hpp>
+
 namespace {
 
 constexpr char kLogTag[] = "ProjectConvergence";
-constexpr float kPi = 3.14159265358979323846F;
+constexpr float kMaxDeltaTimeSeconds = 0.1F;
 
 std::unique_ptr<convergence::Chunk> g_demo_chunk;
+std::unique_ptr<Camera> g_camera;
+
 GLuint g_program = 0;
 GLuint g_vao = 0;
 GLuint g_vbo = 0;
 GLint g_mvp_location = -1;
 GLsizei g_vertex_count = 0;
-std::array<float, 16> g_mvp{};
+
+std::atomic<jlong> g_last_frame_time_ms{0};
+
+struct PendingInput {
+    float look_dx = 0.0F;
+    float look_dy = 0.0F;
+    float joy_forward = 0.0F;
+    float joy_strafe = 0.0F;
+};
+
+std::mutex g_input_mutex;
+PendingInput g_pending_input;
 
 void log_error(const char* message) {
     __android_log_print(ANDROID_LOG_ERROR, kLogTag, "%s", message);
@@ -164,7 +181,7 @@ void build_demo_chunk() {
 
     g_demo_chunk = std::make_unique<convergence::Chunk>();
 
-    // Three stepped layers create a visible block stack for the B.2 prototype.
+    // Three stepped layers create a visible block stack for the B.2/B.3 demo.
     for (int x = 2; x < 14; ++x) {
         for (int z = 2; z < 14; ++z) {
             for (int y = 0; y < 3; ++y) {
@@ -196,7 +213,7 @@ void build_demo_chunk() {
     __android_log_print(
         ANDROID_LOG_INFO,
         kLogTag,
-        "B.2 mesh built: %zu visible faces, %zu vertices.",
+        "Demo chunk built: %zu visible faces, %zu vertices.",
         g_demo_chunk->visible_face_count(),
         g_demo_chunk->mesh_vertices().size()
     );
@@ -243,109 +260,34 @@ void upload_chunk_mesh() {
 
     glBindVertexArray(0);
     g_vertex_count = static_cast<GLsizei>(vertices.size());
-}
 
-struct Vec3 {
-    float x;
-    float y;
-    float z;
-};
-
-Vec3 subtract(Vec3 a, Vec3 b) {
-    return {a.x - b.x, a.y - b.y, a.z - b.z};
-}
-
-Vec3 cross(Vec3 a, Vec3 b) {
-    return {
-        a.y * b.z - a.z * b.y,
-        a.z * b.x - a.x * b.z,
-        a.x * b.y - a.y * b.x,
-    };
-}
-
-float dot(Vec3 a, Vec3 b) {
-    return a.x * b.x + a.y * b.y + a.z * b.z;
-}
-
-Vec3 normalize(Vec3 value) {
-    const float length = std::sqrt(dot(value, value));
-    if (length <= 0.00001F) {
-        return {0.0F, 0.0F, 0.0F};
+    if (g_vao == 0 || g_vbo == 0) {
+        log_error("Failed to create the chunk VAO/VBO.");
+        g_vertex_count = 0;
     }
-    return {value.x / length, value.y / length, value.z / length};
-}
-
-std::array<float, 16> perspective(float fov_radians, float aspect,
-                                  float near_plane, float far_plane) {
-    std::array<float, 16> matrix{};
-    const float f = 1.0F / std::tan(fov_radians * 0.5F);
-    matrix[0] = f / aspect;
-    matrix[5] = f;
-    matrix[10] = (far_plane + near_plane) / (near_plane - far_plane);
-    matrix[11] = -1.0F;
-    matrix[14] = (2.0F * far_plane * near_plane) /
-                 (near_plane - far_plane);
-    return matrix;
-}
-
-std::array<float, 16> look_at(Vec3 eye, Vec3 center, Vec3 up) {
-    const Vec3 forward = normalize(subtract(center, eye));
-    const Vec3 side = normalize(cross(forward, up));
-    const Vec3 corrected_up = cross(side, forward);
-
-    return {{
-        side.x, corrected_up.x, -forward.x, 0.0F,
-        side.y, corrected_up.y, -forward.y, 0.0F,
-        side.z, corrected_up.z, -forward.z, 0.0F,
-        -dot(side, eye), -dot(corrected_up, eye), dot(forward, eye), 1.0F,
-    }};
-}
-
-std::array<float, 16> multiply(const std::array<float, 16>& left,
-                               const std::array<float, 16>& right) {
-    std::array<float, 16> result{};
-    for (int column = 0; column < 4; ++column) {
-        for (int row = 0; row < 4; ++row) {
-            for (int index = 0; index < 4; ++index) {
-                result[column * 4 + row] +=
-                    left[index * 4 + row] * right[column * 4 + index];
-            }
-        }
-    }
-    return result;
-}
-
-void update_camera(int width, int height) {
-    const float aspect = static_cast<float>(width) /
-                         static_cast<float>(height);
-    const auto projection = perspective(50.0F * kPi / 180.0F, aspect,
-                                        0.1F, 100.0F);
-    const float camera_scale = aspect < 0.85F ? 1.25F : 1.0F;
-    const auto view = look_at(
-        {8.0F + 15.0F * camera_scale,
-         4.0F + 14.0F * camera_scale,
-         8.0F + 19.0F * camera_scale},
-        {8.0F, 4.0F, 8.0F},
-        {0.0F, 1.0F, 0.0F}
-    );
-    g_mvp = multiply(projection, view);
 }
 
 }  // namespace
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_convergence_voxel_MainActivity_nativeOnSurfaceCreated(
+Java_com_convergence_voxel_VoxelRenderer_nativeInit(
     JNIEnv* env,
-    jclass /* clazz */,
+    jobject /* thiz */,
     jobject asset_manager
 ) {
-    // OpenGL object names belong to the current EGL context. Recreate them
-    // whenever GLSurfaceView reports a new surface/context.
+    // This callback runs on GLSurfaceView's GL thread. Recreate GL resources
+    // whenever Android creates a new EGL context.
     g_program = 0;
     g_vao = 0;
     g_vbo = 0;
     g_vertex_count = 0;
     g_mvp_location = -1;
+    g_last_frame_time_ms.store(0);
+
+    {
+        std::lock_guard<std::mutex> lock(g_input_mutex);
+        g_pending_input = {};
+    }
 
     glClearColor(0.035F, 0.055F, 0.085F, 1.0F);
     glEnable(GL_DEPTH_TEST);
@@ -353,6 +295,17 @@ Java_com_convergence_voxel_MainActivity_nativeOnSurfaceCreated(
     glEnable(GL_CULL_FACE);
     glCullFace(GL_BACK);
     glFrontFace(GL_CCW);
+
+    if (g_camera == nullptr) {
+        g_camera = std::make_unique<Camera>();
+        // Start just outside the demo structure, looking toward its center.
+        g_camera->position = glm::vec3{8.0F, 8.0F, 25.0F};
+        g_camera->yaw = -90.0F;
+        g_camera->pitch = -10.0F;
+        g_camera->fov = 70.0F;
+        g_camera->movementSpeed = 5.0F;
+        g_camera->lookSensitivity = 0.15F;
+    }
 
     AAssetManager* manager = AAssetManager_fromJava(env, asset_manager);
     g_program = create_program(manager);
@@ -364,6 +317,8 @@ Java_com_convergence_voxel_MainActivity_nativeOnSurfaceCreated(
     g_mvp_location = glGetUniformLocation(g_program, "uMVP");
     if (g_mvp_location < 0) {
         log_error("Shader uniform uMVP was not found.");
+        glDeleteProgram(g_program);
+        g_program = 0;
         return;
     }
 
@@ -372,30 +327,93 @@ Java_com_convergence_voxel_MainActivity_nativeOnSurfaceCreated(
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_convergence_voxel_MainActivity_nativeOnSurfaceChanged(
+Java_com_convergence_voxel_VoxelRenderer_nativeResize(
     JNIEnv* /* env */,
-    jclass /* clazz */,
+    jobject /* thiz */,
     jint width,
     jint height
 ) {
     if (width > 0 && height > 0) {
         glViewport(0, 0, width, height);
-        update_camera(width, height);
     }
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_convergence_voxel_MainActivity_nativeOnDrawFrame(
+Java_com_convergence_voxel_VoxelRenderer_nativeHandleLook(
     JNIEnv* /* env */,
-    jclass /* clazz */
+    jobject /* thiz */,
+    jfloat delta_x,
+    jfloat delta_y
+) {
+    std::lock_guard<std::mutex> lock(g_input_mutex);
+    // Accumulate motion until the GL thread consumes it. This prevents quick
+    // UI-thread touch events from overwriting each other between rendered frames.
+    g_pending_input.look_dx = std::clamp(
+        g_pending_input.look_dx + delta_x, -2000.0F, 2000.0F);
+    g_pending_input.look_dy = std::clamp(
+        g_pending_input.look_dy + delta_y, -2000.0F, 2000.0F);
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_convergence_voxel_VoxelRenderer_nativeHandleJoystick(
+    JNIEnv* /* env */,
+    jobject /* thiz */,
+    jfloat forward,
+    jfloat strafe
+) {
+    std::lock_guard<std::mutex> lock(g_input_mutex);
+    g_pending_input.joy_forward = std::clamp(forward, -1.0F, 1.0F);
+    g_pending_input.joy_strafe = std::clamp(strafe, -1.0F, 1.0F);
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_convergence_voxel_VoxelRenderer_nativeResetFrameClock(
+    JNIEnv* /* env */,
+    jobject /* thiz */
+) {
+    g_last_frame_time_ms.store(0);
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_convergence_voxel_VoxelRenderer_nativeRender(
+    JNIEnv* /* env */,
+    jobject /* thiz */,
+    jlong now_ms,
+    jfloat aspect
 ) {
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-    if (g_program == 0 || g_vao == 0 || g_vertex_count <= 0) {
+
+    if (g_program == 0 || g_vao == 0 || g_vertex_count <= 0 ||
+        g_camera == nullptr) {
         return;
     }
 
+    const jlong previous_time_ms = g_last_frame_time_ms.exchange(now_ms);
+    float delta_time = 0.0F;
+    if (previous_time_ms > 0 && now_ms > previous_time_ms) {
+        delta_time = static_cast<float>(now_ms - previous_time_ms) / 1000.0F;
+    }
+    delta_time = std::clamp(delta_time, 0.0F, kMaxDeltaTimeSeconds);
+
+    PendingInput input;
+    {
+        std::lock_guard<std::mutex> lock(g_input_mutex);
+        input = g_pending_input;
+        g_pending_input.look_dx = 0.0F;
+        g_pending_input.look_dy = 0.0F;
+        // Joystick values remain active until the pointer is released.
+    }
+
+    g_camera->processLook(input.look_dx, input.look_dy);
+    g_camera->processMovement(
+        input.joy_forward, input.joy_strafe, delta_time);
+
+    const float safe_aspect = std::max(aspect, 0.001F);
+    const glm::mat4 mvp =
+        g_camera->getProjectionMatrix(safe_aspect) * g_camera->getViewMatrix();
+
     glUseProgram(g_program);
-    glUniformMatrix4fv(g_mvp_location, 1, GL_FALSE, g_mvp.data());
+    glUniformMatrix4fv(g_mvp_location, 1, GL_FALSE, glm::value_ptr(mvp));
     glBindVertexArray(g_vao);
     glDrawArrays(GL_TRIANGLES, 0, g_vertex_count);
     glBindVertexArray(0);

@@ -38,13 +38,23 @@ Status describes repository evidence. A checked item means the corresponding cod
 - [ ] Verify Android Gradle/NDK build in CI
 - [ ] Run and visually inspect on physical Android devices
 
-**B.2 boundary note:** faces on chunk edges are retained because cross-chunk neighbor data is not yet implemented. This avoids holes at exposed edges in a single-chunk scene, but neighboring solid chunks may temporarily produce duplicate internal boundary faces.
+### B.3 — First-Person Camera and Touch Controls
 
-### B.3 — Camera and Input
+- [x] Native Camera class with position, yaw, pitch, and front vector
+- [x] GLM view and perspective projection matrices
+- [x] Look sensitivity and pitch clamp
+- [x] Frame-independent movement using delta time
+- [x] Delta-time clamp and frame-clock reset on lifecycle pause/resume
+- [x] Horizontal joystick movement with diagonal speed normalization
+- [x] JNI look and joystick input callbacks
+- [x] Mutex-protected input state between UI and GL threads
+- [x] Multi-touch pointer tracking (left joystick + right look simultaneously)
+- [x] Floating virtual joystick overlay
+- [x] Demo camera starts facing the B.2 block stack
+- [ ] Verify Android Gradle/NDK build in CI
+- [ ] Verify multi-touch behavior and camera feel on physical devices
 
-- [ ] First-person camera
-- [ ] Touch look and movement controls
-- [ ] Camera collision and sensitivity settings
+**B.3 limitations:** movement does not yet implement collision, gravity, jumping, sprinting, or camera sensitivity settings. The joystick and look controls are the initial interaction layer, not a complete player controller.
 
 ### B.4 — World Generation
 

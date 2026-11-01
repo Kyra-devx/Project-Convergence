@@ -1,47 +1,48 @@
 package com.convergence.voxel;
 
 import android.app.Activity;
-import android.content.res.AssetManager;
-import android.opengl.GLSurfaceView;
 import android.os.Bundle;
+import android.widget.FrameLayout;
 import android.view.ViewGroup;
 
-import javax.microedition.khronos.egl.EGLConfig;
-import javax.microedition.khronos.opengles.GL10;
-
-/** Android entry point for the Project Convergence rendering prototype. */
+/** Android entry point for the Project Convergence first-person prototype. */
 public final class MainActivity extends Activity {
-    static {
-        System.loadLibrary("convergence");
-    }
-
-    private GLSurfaceView glSurfaceView;
-
-    private static native void nativeOnSurfaceCreated(AssetManager assetManager);
-    private static native void nativeOnSurfaceChanged(int width, int height);
-    private static native void nativeOnDrawFrame();
+    private VoxelGLSurfaceView glSurfaceView;
+    private TouchControlsOverlay controlsOverlay;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
-        glSurfaceView = new GLSurfaceView(this);
-        glSurfaceView.setEGLContextClientVersion(3);
-        glSurfaceView.setRenderer(new ConvergenceRenderer());
-        glSurfaceView.setRenderMode(GLSurfaceView.RENDERMODE_CONTINUOUSLY);
+        glSurfaceView = new VoxelGLSurfaceView(this);
+        controlsOverlay = new TouchControlsOverlay(this, glSurfaceView);
 
-        addContentView(
+        FrameLayout root = new FrameLayout(this);
+        root.addView(
             glSurfaceView,
-            new ViewGroup.LayoutParams(
+            new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT
             )
         );
+        root.addView(
+            controlsOverlay,
+            new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        );
+
+        setContentView(root);
     }
 
     @Override
     protected void onPause() {
+        if (controlsOverlay != null) {
+            controlsOverlay.cancelInput();
+        }
         if (glSurfaceView != null) {
+            glSurfaceView.resetFrameClock();
             glSurfaceView.onPause();
         }
         super.onPause();
@@ -51,24 +52,8 @@ public final class MainActivity extends Activity {
     protected void onResume() {
         super.onResume();
         if (glSurfaceView != null) {
+            glSurfaceView.resetFrameClock();
             glSurfaceView.onResume();
-        }
-    }
-
-    private final class ConvergenceRenderer implements GLSurfaceView.Renderer {
-        @Override
-        public void onSurfaceCreated(GL10 unused, EGLConfig config) {
-            nativeOnSurfaceCreated(getAssets());
-        }
-
-        @Override
-        public void onSurfaceChanged(GL10 unused, int width, int height) {
-            nativeOnSurfaceChanged(width, height);
-        }
-
-        @Override
-        public void onDrawFrame(GL10 unused) {
-            nativeOnDrawFrame();
         }
     }
 }

@@ -28,8 +28,8 @@ Mengeksplorasi arsitektur voxel yang memadukan kedalaman mekanik, runtime native
 |---|---|---|
 | **A. Game Design Document** | Draft v0.1 tersedia | Visi, mekanik inti, combat, hardcore, dan world generation didokumentasikan |
 | **B.1 Engine foundation** | Scaffold tersedia | Modul Android, JNI bridge, CMake, dan data model voxel |
-| **B.2 Face culling + lighting** | Implementasi awal tersedia | Mesher 16³, normals per face, shader GLSL, VAO/VBO, camera MVP, draw call, dan tes native; Android device belum diverifikasi |
-| **B.3 Camera + touch** | Direncanakan | Kontrol first-person dan input sentuh |
+| **B.2 Face culling + lighting** | Implementasi awal tersedia | Mesher 16³, normals, shader, VAO/VBO, dan tes native |
+| **B.3 First-person + touch** | Implementasi awal tersedia | Camera GLM, yaw/pitch, delta-time movement, multi-touch, dan virtual joystick; device verification pending |
 | **B.4 World generation** | Direncanakan | Terrain noise dan biome |
 | **B.5 Chunk streaming** | Direncanakan | Neighbor-aware meshing, chunk loading/unloading |
 | **C. Redstone Engine** | Direncanakan | Scheduler deterministik, update order, dan test suite |
@@ -42,30 +42,45 @@ Lihat [ROADMAP.md](ROADMAP.md) untuk status yang lebih rinci.
 ## Arsitektur tingkat tinggi
 
 ~~~~text
-┌──────────────────────────────────────────────────┐
-│ Android Application: UI · Lifecycle · Touch      │
-├──────────────────────────────────────────────────┤
-│ JNI Boundary: Asset loading · Surface lifecycle  │
-├──────────────────────────────────────────────────┤
-│ Native C++ Engine: Chunk data · Face culling     │
-├──────────────────────────────────────────────────┤
-│ OpenGL ES 3.0: Shader · VAO/VBO · Depth testing  │
-├──────────────────────────────────────────────────┤
-│ Android Platform: Min SDK 24                     │
-└──────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────┐
+│ Android Activity + TouchControlsOverlay             │
+│ Left: virtual joystick · Right: look                │
+├────────────────────────────────────────────────────┤
+│ VoxelGLSurfaceView + VoxelRenderer (GL thread)      │
+│ Frame clock · EGL lifecycle · Native render calls  │
+├────────────────────────────────────────────────────┤
+│ JNI Input Boundary                                  │
+│ Mutex-protected look delta and joystick state       │
+├────────────────────────────────────────────────────┤
+│ C++ Camera (GLM) + Chunk Mesher                     │
+│ Position · yaw/pitch · view/projection · delta time │
+├────────────────────────────────────────────────────┤
+│ OpenGL ES 3.0: GLSL · VAO/VBO · Depth/Culling       │
+└────────────────────────────────────────────────────┘
 ~~~~
 
-**Stack awal:** Java (Android SDK), C++17 (Android NDK), OpenGL ES 3.0, GLSL ES 3.0, JNI, dan CMake. Vulkan merupakan jalur eksplorasi lanjutan, bukan dependensi prototipe saat ini. Ray tracing tidak diasumsikan tersedia di seluruh perangkat Android.
+**Stack:** Java Android SDK, C++17 Android NDK, GLM 1.0.1 (header-only, pinned revision), OpenGL ES 3.0, GLSL ES 3.0, JNI, dan CMake. Vulkan merupakan jalur eksplorasi lanjutan, bukan dependensi prototipe saat ini.
 
-## Face-culling meshing — Fase B.2
+## Fase B.2 — Face culling dan basic lighting
 
-Mesher menghasilkan geometri hanya untuk face blok yang menghadap udara atau berada pada tepi chunk. Face yang berdampingan dengan blok solid di chunk yang sama dihilangkan. Setiap vertex membawa posisi, normal, dan warna; shader fragment menerapkan directional diffuse lighting dengan ambient minimum.
+Mesher menghasilkan geometri hanya untuk face blok yang menghadap udara atau berada pada tepi chunk. Face di antara blok solid dalam chunk yang sama dihilangkan. Setiap vertex membawa posisi, normal, dan RGB color.
 
-Tes native mencakup chunk kosong, satu blok, dua blok berdampingan, satu chunk solid 16³, dan konsistensi winding terhadap normal.
+Untuk chunk solid 16³, naive meshing menghasilkan 49.152 triangle, sedangkan face culling menghasilkan 3.072 triangle pada enam permukaan luar. Ini adalah kasus uji solid penuh, bukan klaim performa untuk semua terrain.
 
-**Batas saat ini:** neighbor di luar chunk diperlakukan sebagai udara, sehingga face di batas chunk tetap dibuat. Neighbor-aware occlusion akan ditambahkan bersama chunk manager pada fase berikutnya. Persentase face yang tersisa bergantung pada bentuk dan kepadatan world; angka pengurangan bukan jaminan untuk setiap scene.
+Batas saat ini: neighbor di luar chunk diperlakukan sebagai udara. Neighbor-aware occlusion lintas chunk menunggu chunk manager.
 
-Untuk chunk 16³ yang seluruhnya solid, naive meshing menghasilkan 49.152 triangle, sedangkan face-culling menghasilkan 3.072 triangle pada enam permukaan luar (6,25% dari jumlah awal). Ini adalah kasus uji solid penuh, bukan klaim performa untuk seluruh terrain.
+## Fase B.3 — First-person camera dan touch controls
+
+- Camera native C++ menggunakan GLM untuk position, yaw, pitch, view matrix, dan perspective projection.
+- Look input mengubah yaw/pitch; pitch dibatasi agar kamera tidak terbalik.
+- Joystick movement memakai delta time, dengan batas maksimum 0,1 detik per frame untuk menghindari lonjakan setelah frame terlambat.
+- Input kiri memakai floating virtual joystick; input kanan mengontrol look.
+- Satu pointer untuk joystick dan satu pointer untuk look dapat aktif bersamaan.
+- Input JNI dilindungi mutex; GL calls tetap berlangsung pada GL thread.
+- Gerakan berjalan pada bidang horizontal; pitch kamera tidak membuat joystick mengangkat atau menenggelamkan pemain.
+- Overlay menampilkan basis dan knob joystick saat pointer kiri aktif.
+
+Kontrol ini belum mencakup collision, gravity, jump, sprint, touch sensitivity settings, atau gesture customization. Build Android dan pemeriksaan input di perangkat fisik tetap perlu diverifikasi.
 
 ## Struktur repository
 
@@ -80,19 +95,23 @@ Untuk chunk 16³ yang seluruhnya solid, naive meshing menghasilkan 49.152 triang
 │   ├── build.gradle
 │   └── src/main/
 │       ├── java/com/convergence/voxel/
+│       │   ├── MainActivity.java
+│       │   ├── VoxelRenderer.java
+│       │   ├── VoxelGLSurfaceView.java
+│       │   └── TouchControlsOverlay.java
 │       ├── cpp/
+│       │   ├── Camera.h
+│       │   ├── Camera.cpp
+│       │   └── native-lib.cpp
 │       ├── assets/shaders/
 │       └── res/
-├── engine/
-│   ├── include/convergence/
-│   ├── src/
-│   └── tests/
+├── engine/{include,src,tests}/
 └── tools/{redstone-test-suite,world-converter}/
 ~~~~
 
 ## Build prototipe Android
 
-Prasyarat: Android Studio dengan dukungan Android Gradle Plugin 8.7.x, JDK 17, Android SDK Platform 35, Android NDK r25+ (konfigurasi awal menargetkan 27.0.12077973), CMake 3.22.1, dan perangkat/emulator dengan OpenGL ES 3.0.
+Prasyarat: Android Studio dengan dukungan Android Gradle Plugin 8.7.x, JDK 17, Android SDK Platform 35, Android NDK r25+ (konfigurasi menargetkan 27.0.12077973), dan CMake 3.22.1. GLM 1.0.1 diambil oleh CMake FetchContent dari upstream pada konfigurasi pertama; koneksi jaringan diperlukan kecuali source dependency sudah tersedia di cache.
 
 ~~~~bash
 git clone https://github.com/Kyra-devx/Project-Convergence.git
@@ -101,7 +120,7 @@ cd Project-Convergence
 
 Buka folder repository di Android Studio, pasang SDK/NDK/CMake yang diminta, lalu lakukan Gradle Sync dan jalankan konfigurasi app. Gradle Wrapper belum disertakan; Android Studio atau instalasi Gradle lokal diperlukan sampai wrapper resmi ditambahkan.
 
-Ketika build dan runtime Android berhasil, demo menampilkan tumpukan voxel bertingkat dengan warna grass/dirt/stone dan directional lighting. Scaffold menyediakan kamera statis untuk framing demo; first-person camera dan touch control masih fase B.3. Android build dan pengujian pada perangkat belum diverifikasi pada commit ini.
+Saat runtime berhasil, demo menampilkan tumpukan voxel bertingkat. Seret di kanan untuk mengubah arah pandang, dan gunakan joystick kiri untuk bergerak maju/mundur/strafe. First-person camera belum memiliki collision atau physics. Android build dan pengujian perangkat belum diverifikasi pada commit ini.
 
 ## Dokumentasi
 
@@ -113,7 +132,7 @@ Ketika build dan runtime Android berhasil, demo menampilkan tumpukan voxel berti
 
 ## Area kontribusi
 
-Prioritas awal: verifikasi build Android, chunk meshing dan face culling, world generation dan penyimpanan chunk, spesifikasi redstone deterministik, serta desain kontrol mobile.
+Prioritas awal: verifikasi Android build dan perangkat, collision/physics, chunk meshing lintas batas, world generation, redstone deterministik, dan peningkatan input mobile.
 
 ## Lisensi
 
