@@ -53,10 +53,23 @@ std::string read_asset(AAssetManager* manager, const char* path) {
     }
 
     std::string source(static_cast<std::size_t>(asset_length), '\0');
-    const int bytes_read = AAsset_read(asset, source.data(), source.size());
+    std::size_t total_bytes_read = 0;
+    bool read_complete = true;
+    while (total_bytes_read < source.size()) {
+        const int bytes_read = AAsset_read(
+            asset,
+            source.data() + total_bytes_read,
+            source.size() - total_bytes_read
+        );
+        if (bytes_read <= 0) {
+            read_complete = false;
+            break;
+        }
+        total_bytes_read += static_cast<std::size_t>(bytes_read);
+    }
     AAsset_close(asset);
 
-    if (bytes_read != asset_length) {
+    if (!read_complete) {
         __android_log_print(ANDROID_LOG_ERROR, kLogTag,
                             "Could not read complete shader asset: %s", path);
         return {};
