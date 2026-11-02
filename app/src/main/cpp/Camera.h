@@ -1,7 +1,5 @@
 #pragma once
 
-#include "WorldGenerator.h"
-
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
@@ -19,8 +17,8 @@ public:
     float eyeHeight = 1.7F;
 
     void processLook(float deltaX, float deltaY);
-    void processMovement(float forward, float strafe, float deltaTime,
-                         const WorldGenerator& world);
+    void processMovement(float forward, float strafe, float deltaTime);
+    void applyGroundCollision(float terrainHeight) noexcept;
 
     [[nodiscard]] glm::mat4 getViewMatrix() const;
     [[nodiscard]] glm::mat4 getProjectionMatrix(float aspect) const;

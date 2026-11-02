@@ -28,10 +28,11 @@ Mengeksplorasi arsitektur voxel yang memadukan kedalaman mekanik, runtime native
 |---|---|---|
 | **A. Game Design Document** | Draft v0.1 tersedia | Visi, mekanik inti, combat, hardcore, dan world generation didokumentasikan |
 | **B.1 Engine foundation** | Scaffold tersedia | Modul Android, JNI bridge, CMake, dan data model voxel |
-| **B.2 Face culling + lighting** | Implementasi awal tersedia | Mesher 16³, normals, shader, VAO/VBO, dan tes native |
+| **B.2 Face culling + lighting** | Implementasi awal tersedia | Mesher CPU, normals, shader, VAO/VBO, dan tes native; volume chunk diperluas menjadi 16×128×16 pada B.6 |
 | **B.3 First-person + touch** | Implementasi awal tersedia | Camera GLM, yaw/pitch, delta-time movement, multi-touch, dan virtual joystick; device verification pending |
 | **B.4 World generation** | Implementasi prototipe tersedia | FastNoiseLite height/detail noise, seeded terrain, vertical chunk sections, gravity, dan floor collision; biome application, save persistence, serta horizontal streaming belum tersedia |
-| **B.5 Chunk streaming** | Implementasi prototipe tersedia | Radius chunk dinamis, culling tetangga, load bertahap, unload hysteresis, mesh revision dan GPU buffer refresh; worker threads dan device profiling belum tersedia |
+| **B.5 Chunk streaming** | Implementasi prototipe tersedia | Radius chunk dinamis, culling tetangga, load/unload dan mesh revision; generation masih sinkron hingga B.6 |
+| **B.6 Async generation** | Implementasi prototipe tersedia | Worker thread menghasilkan block data; ready queue, mesh budget 2 per frame, dan upload VBO per chunk hanya saat mesh berubah pada GL thread; build/perangkat belum diverifikasi |
 | **C. Redstone Engine** | Direncanakan | Scheduler deterministik, update order, dan test suite |
 | **D. Combat System** | Direncanakan | Timing, shield, damage model, dan kontrol sentuh |
 | **E. Compatibility Layer** | Riset | Parser serta adapter berbasis subset; bukan janji menjalankan semua mod Java |
@@ -65,7 +66,7 @@ Lihat [ROADMAP.md](ROADMAP.md) untuk status yang lebih rinci.
 
 Mesher menghasilkan geometri hanya untuk face blok yang menghadap udara atau berada pada tepi chunk. Face di antara blok solid dalam chunk yang sama dihilangkan. Setiap vertex membawa posisi, normal, dan RGB color.
 
-Untuk chunk solid 16³, naive meshing menghasilkan 49.152 triangle, sedangkan face culling menghasilkan 3.072 triangle pada enam permukaan luar. Ini adalah kasus uji solid penuh, bukan klaim performa untuk semua terrain.
+Untuk chunk solid 16×128×16, naive meshing menghasilkan 393.216 triangle, sedangkan face culling menghasilkan 17.408 triangle pada enam permukaan luar. Ini adalah kasus uji solid penuh, bukan klaim performa untuk semua terrain.
 
 Batas saat ini: neighbor yang belum dimuat diperlakukan sebagai udara. Saat chunk tetangga dimuat atau dibongkar, mesh kolom terkait dibangun ulang agar face di batas chunk ikut di-culling.
 
@@ -100,6 +101,7 @@ Kontrol ini kini mencakup gravity dasar dan floor collision berbasis heightmap. 
 │       │   ├── VoxelGLSurfaceView.java
 │       │   └── TouchControlsOverlay.java
 │       ├── cpp/
+│       │   ├── VoxelDims.h
 │       │   ├── Camera.h / Camera.cpp
 │       │   ├── WorldGenerator.h / WorldGenerator.cpp
 │       │   ├── ChunkManager.h / ChunkManager.cpp
@@ -121,7 +123,7 @@ cd Project-Convergence
 
 Buka folder repository di Android Studio, pasang SDK/NDK/CMake yang diminta, lalu lakukan Gradle Sync dan jalankan konfigurasi app. Gradle Wrapper belum disertakan; Android Studio atau instalasi Gradle lokal diperlukan sampai wrapper resmi ditambahkan.
 
-Saat runtime berhasil, demo memuat terrain procedural di sekitar pemain dengan seed 12345 dan view distance 4. Kolom chunk dimuat bertahap dua per frame dan dibongkar setelah melewati radius dengan hysteresis. Culling lintas batas diterapkan saat tetangga tersedia. Gravity dan floor collision memakai heightmap yang sama. Worker-thread generation, biome, save persistence, Android build, dan pengujian perangkat masih belum diverifikasi.
+Saat runtime berhasil, demo memuat terrain procedural 16×128×16 di sekitar pemain dengan seed 12345 dan view distance 4. Satu worker menghasilkan block data; maksimal 6 hasil dikumpulkan dan 2 mesh dibangun per frame. VBO setiap chunk hanya diunggah ulang pada GL thread ketika revision chunk berubah; renderer menggambar chunk yang sudah memiliki mesh secara terpisah. Chunk yang terlalu jauh dibongkar setelah melewati radius dengan hysteresis. Gravity dan floor collision memakai heightmap yang sama. Android build, CTest, dan pengujian perangkat masih belum diverifikasi; biome dan seed persistence belum tersedia.
 
 ## Dokumentasi
 

@@ -28,7 +28,8 @@ if(BUILD_TESTING)
     target_link_libraries(chunk_mesher_test PRIVATE convergence_engine)
     add_test(NAME chunk_mesher_test COMMAND chunk_mesher_test)
 
-    # The platform-independent world generator is also covered by native tests.
+    # The generator and manager tests exercise their app-side implementations.
+    find_package(Threads REQUIRED)
     set(WORLD_GENERATOR_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../app/src/main/cpp)
     add_executable(
         world_generator_test
@@ -36,6 +37,7 @@ if(BUILD_TESTING)
         ${WORLD_GENERATOR_DIR}/WorldGenerator.cpp
     )
     target_include_directories(world_generator_test PRIVATE ${WORLD_GENERATOR_DIR})
+    target_link_libraries(world_generator_test PRIVATE convergence_engine)
     target_compile_features(world_generator_test PRIVATE cxx_std_17)
     add_test(NAME world_generator_test COMMAND world_generator_test)
 
@@ -46,7 +48,7 @@ if(BUILD_TESTING)
         ${WORLD_GENERATOR_DIR}/ChunkManager.cpp
     )
     target_include_directories(chunk_manager_test PRIVATE ${WORLD_GENERATOR_DIR})
-    target_link_libraries(chunk_manager_test PRIVATE convergence_engine)
+    target_link_libraries(chunk_manager_test PRIVATE convergence_engine Threads::Threads)
     target_compile_features(chunk_manager_test PRIVATE cxx_std_17)
     add_test(NAME chunk_manager_test COMMAND chunk_manager_test)
 endif()

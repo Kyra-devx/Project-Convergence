@@ -23,7 +23,7 @@ Status describes repository evidence. A checked item means the corresponding cod
 
 ### B.2 — Face Culling and Basic Lighting
 
-- [x] Chunk data model sized 16 × 16 × 16
+- [x] Initial chunk data model sized 16 × 16 × 16 (expanded to 16 × 128 × 16 in B.6)
 - [x] Skip air blocks during mesh generation
 - [x] Emit faces only when the in-chunk neighbor is air
 - [x] Keep boundary faces visible when neighbor chunk data is unavailable
@@ -54,7 +54,7 @@ Status describes repository evidence. A checked item means the corresponding cod
 - [ ] Verify Android Gradle/NDK build in CI
 - [ ] Verify multi-touch behavior and camera feel on physical devices
 
-**B.3 limitations:** movement does not yet implement collision, gravity, jumping, sprinting, or camera sensitivity settings. The joystick and look controls are the initial interaction layer, not a complete player controller.
+**B.3 limitations at its original phase:** movement initially lacked collision, gravity, jumping, sprinting, and camera sensitivity settings. B.4 later added basic gravity and heightmap floor collision; jumping and sprinting remain future work.
 
 ### B.4 — World Generation
 
@@ -67,7 +67,7 @@ Status describes repository evidence. A checked item means the corresponding cod
 - [ ] Apply biome selection to surface materials and terrain shaping
 - [ ] Persist world seed and generator version
 
-**B.4 limitations:** only the X/Z chunk column at (0, 0) is rendered; this is not horizontal chunk streaming. Biome noise is configured but not yet applied. The seed is currently a native constant, not a UI setting or saved-world property. Android build and device verification remain pending.
+**B.4 limitations at its original phase:** generation initially rendered one X/Z column. B.5 added horizontal streaming, and B.6 consolidated the five vertical sections into a single 16 × 128 × 16 chunk. Biome noise is configured but not yet applied. The seed remains a native constant, not a UI setting or saved-world property. Android build and device verification remain pending.
 
 ### B.5 — Chunk Streaming
 
@@ -75,13 +75,35 @@ Status describes repository evidence. A checked item means the corresponding cod
 - [x] Load chunks around the player and unload distant chunks with hysteresis
 - [x] Incremental nearest-first loading budget per frame
 - [x] Neighbor-aware face culling across X/Z boundaries
-- [x] Neighbor-aware culling between the five vertical terrain sections
+- [x] Neighbor-aware culling between the five vertical terrain sections (superseded by the single 128-block-high column in B.6)
 - [x] Rebuild adjacent meshes when a neighbor loads or unloads
-- [x] CPU-only chunk ownership with RAII and one renderer-owned merged GPU mesh
+- [x] CPU-only chunk ownership with RAII and renderer-owned GPU resources (B.6 uses per-chunk VAO/VBO)
 - [x] Mesh revision tracking and GL buffer refresh on world changes
-- [ ] Async chunk generation and mesh builds on worker threads (deferred to B.6)
+- [x] Async block generation on a worker thread (implemented in B.6); mesh builds remain budgeted on the GL thread
 
-**B.5 limitations:** generation and meshing are still synchronous on the GL render thread, with two X/Z columns loaded per update to limit spikes. A view distance of 4 represents 81 X/Z columns and five vertical sections per column (405 cubic sections). This prototype does not prove an infinite world, stable 60 FPS, or low-end device performance; profiling and device validation remain pending.
+**B.5 limitations at its original phase:** block generation and meshing were synchronous on the GL render thread. B.6 moves only block generation to a worker; CPU mesh building remains budgeted on the GL thread. A view distance of 4 requests 81 X/Z columns, each now represented by one 16 × 128 × 16 chunk. This prototype does not prove an infinite world, stable 60 FPS, or low-end device performance; profiling and device validation remain pending.
+
+
+### B.6 — Async Chunk Generation
+
+- [x] Canonical chunk dimensions 16 × 128 × 16 (32,768 block IDs)
+- [x] Shared X-fastest block layout in VoxelDims.h and portable engine dimensions
+- [x] One C++ worker thread for terrain block generation only
+- [x] Pending request queue with coordinate deduplication and a bounded queue
+- [x] Nearest-first queued work reprioritized around the current camera
+- [x] Stale queued/ready requests pruned after camera movement
+- [x] Ready queue collected on the GL/render thread (maximum 6 results per update)
+- [x] CPU mesh build budget limited to 2 chunks per update
+- [x] Neighbor meshes marked dirty when a chunk loads or unloads
+- [x] GPU upload remains exclusively on the GLSurfaceView GL thread
+- [x] Per-chunk VAO/VBO resources update only when that chunk mesh revision changes
+- [x] Unloaded chunk GPU resources are released on the GL thread
+- [x] Worker shutdown, queue cleanup, and join before WorldGenerator destruction
+- [ ] Native CMake/CTest execution
+- [ ] Android NDK/APK build and EGL runtime verification
+- [ ] Device profiling during continuous chunk traversal
+
+**B.6 limitations:** generation is asynchronous, but CPU meshing remains on the GL thread. Each changed chunk is uploaded independently, avoiding a full-world VBO refresh; this trades larger uploads for more draw calls (up to one per loaded chunk with a non-empty mesh). One worker is used; multi-worker scheduling, frustum culling, GPU instancing, and persistence are future work. A source-level implementation is not evidence of stable 60 FPS.
 
 ## Phase C — Redstone Simulation
 

@@ -25,8 +25,7 @@ void Camera::processLook(float deltaX, float deltaY) {
     }
 }
 
-void Camera::processMovement(float forward, float strafe, float deltaTime,
-                             const WorldGenerator& world) {
+void Camera::processMovement(float forward, float strafe, float deltaTime) {
     if (deltaTime <= 0.0F) return;
 
     glm::vec3 front = getFrontVector();
@@ -41,18 +40,17 @@ void Camera::processMovement(float forward, float strafe, float deltaTime,
     const float movementLength = glm::length(movement);
     if (movementLength > 1.0F) movement /= movementLength;
 
-    glm::vec3 nextPosition =
-        position + movement * movementSpeed * deltaTime;
+    position += movement * movementSpeed * deltaTime;
     verticalVelocity -= gravity * deltaTime;
-    nextPosition.y += verticalVelocity * deltaTime;
+    position.y += verticalVelocity * deltaTime;
+}
 
-    const float groundY =
-        world.getTerrainHeight(nextPosition.x, nextPosition.z) + eyeHeight;
-    if (nextPosition.y < groundY) {
-        nextPosition.y = groundY;
+void Camera::applyGroundCollision(float terrainHeight) noexcept {
+    const float groundY = terrainHeight + eyeHeight;
+    if (position.y < groundY) {
+        position.y = groundY;
         verticalVelocity = 0.0F;
     }
-    position = nextPosition;
 }
 
 glm::mat4 Camera::getViewMatrix() const {

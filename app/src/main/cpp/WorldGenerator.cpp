@@ -4,14 +4,18 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 
 namespace {
+
 int offset_seed(std::int64_t seed, std::uint32_t offset) noexcept {
     const std::uint32_t bits =
         static_cast<std::uint32_t>(static_cast<std::uint64_t>(seed) + offset);
     if (bits <= 0x7FFFFFFFU) return static_cast<int>(bits);
-    return static_cast<int>(static_cast<std::int64_t>(bits) - 0x100000000LL);
+    return static_cast<int>(
+        static_cast<std::int64_t>(bits) - 0x100000000LL);
 }
+
 }  // namespace
 
 WorldGenerator::WorldGenerator(std::int64_t seed) {
@@ -26,8 +30,6 @@ WorldGenerator::WorldGenerator(std::int64_t seed) {
     detailNoise.SetSeed(offset_seed(seed, 1U));
     detailNoise.SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
     detailNoise.SetFrequency(0.05F);
-    // FastNoiseLite defaults to FractalType_None; FBm activates the two
-    // configured detail octaves rather than silently sampling only one.
     detailNoise.SetFractalType(FastNoiseLite::FractalType_FBm);
     detailNoise.SetFractalOctaves(2);
 
@@ -42,9 +44,10 @@ int WorldGenerator::calculateHeight(float worldX,
     const float h2 = detailNoise.GetNoise(worldX, worldZ);
     float normalized = std::clamp((h1 + 1.0F) * 0.5F, 0.0F, 1.0F);
     normalized = std::pow(normalized, 1.3F);
+
     const int height = static_cast<int>(
         BASE_HEIGHT + normalized * HEIGHT_VARIATION + h2 * 3.0F);
-    return std::clamp(height, 1, 127);
+    return std::clamp(height, 1, cvg::SY - 1);
 }
 
 float WorldGenerator::getTerrainHeight(float worldX,
@@ -52,38 +55,35 @@ float WorldGenerator::getTerrainHeight(float worldX,
     return static_cast<float>(calculateHeight(worldX, worldZ));
 }
 
-void WorldGenerator::generateChunk(int chunkX, int chunkY, int chunkZ,
+void WorldGenerator::generateChunk(int chunkX, int chunkZ,
                                    std::uint8_t* blocksOut) const noexcept {
     if (blocksOut == nullptr) return;
 
-    constexpr std::size_t kBlockCount =
-        static_cast<std::size_t>(CHUNK_SIZE) * CHUNK_SIZE * CHUNK_SIZE;
-    std::fill(blocksOut, blocksOut + kBlockCount, static_cast<std::uint8_t>(0));
+    std::fill(blocksOut, blocksOut + cvg::BLOCK_COUNT,
+              static_cast<std::uint8_t>(0));
 
-    const std::int64_t worldOriginY =
-        static_cast<std::int64_t>(chunkY) * CHUNK_SIZE;
-    for (int localX = 0; localX < CHUNK_SIZE; ++localX) {
-        const float worldX = static_cast<float>(
-            static_cast<std::int64_t>(chunkX) * CHUNK_SIZE + localX);
-        for (int localZ = 0; localZ < CHUNK_SIZE; ++localZ) {
-            const float worldZ = static_cast<float>(
-                static_cast<std::int64_t>(chunkZ) * CHUNK_SIZE + localZ);
-            const int height = calculateHeight(worldX, worldZ);
-            for (int localY = 0; localY < CHUNK_SIZE; ++localY) {
-                const std::int64_t worldY = worldOriginY + localY;
+    const std::int64_t worldOriginX =
+        static_cast<std::int64_t>(chunkX) * cvg::SX;
+    const std::int64_t worldOriginZ =
+        static_cast<std::int64_t>(chunkZ) * cvg::SZ;
+
+    for (int localX = 0; localX < cvg::SX; ++localX) {
+        const float worldX = static_cast<float>(worldOriginX + localX);
+        for (int localZ = 0; localZ < cvg::SZ; ++localZ) {
+            const float worldZ = static_cast<float>(worldOriginZ + localZ);
+            const int height = std::clamp(
+                calculateHeight(worldX, worldZ), 1, cvg::SY - 1);
+
+            for (int y = 0; y < cvg::SY; ++y) {
                 std::uint8_t block = 0;
-                if (worldY < height - 4) {
+                if (y < height - 4) {
                     block = 3;  // Stone
-                } else if (worldY < height - 1) {
+                } else if (y < height - 1) {
                     block = 2;  // Dirt
-                } else if (worldY == height - 1) {
-                    block = (height < SEA_LEVEL + 2) ? 2 : 1;  // Grass/Dirt
+                } else if (y == height - 1) {
+                    block = (height < SEA_LEVEL + 2) ? 2 : 1;
                 }
-                // Contiguous [x][y][z] layout, identical to engine Chunk.
-                const std::size_t index =
-                    (static_cast<std::size_t>(localX) * CHUNK_SIZE + localY) *
-                        CHUNK_SIZE + localZ;
-                blocksOut[index] = block;
+                blocksOut[cvg::index(localX, y, localZ)] = block;
             }
         }
     }

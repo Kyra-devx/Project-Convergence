@@ -2,28 +2,15 @@
 
 #include <algorithm>
 #include <cmath>
-#include <cstdint>
 #include <cstdlib>
 #include <functional>
 #include <limits>
-#include <unordered_set>
 #include <utility>
 
 namespace {
 
-constexpr int kChunkSize = convergence::Chunk::kSize;
-constexpr int kUnloadHysteresis = 2;
-
-void append_neighbor(std::vector<ChunkCoord>& output,
-                     std::int64_t x, std::int64_t z) {
-    if (x < std::numeric_limits<int>::min() ||
-        x > std::numeric_limits<int>::max() ||
-        z < std::numeric_limits<int>::min() ||
-        z > std::numeric_limits<int>::max()) {
-        return;
-    }
-    output.push_back({static_cast<int>(x), static_cast<int>(z)});
-}
+constexpr int kChunkSizeX = cvg::SX;
+constexpr int kChunkSizeZ = cvg::SZ;
 
 [[nodiscard]] std::size_t hash_combine(std::size_t seed,
                                        std::size_t value) noexcept {
@@ -34,17 +21,17 @@ void append_neighbor(std::vector<ChunkCoord>& output,
 }  // namespace
 
 std::size_t ChunkCoordHash::operator()(const ChunkCoord& coord) const noexcept {
-    const std::size_t xHash = std::hash<int>{}(coord.x);
-    const std::size_t zHash = std::hash<int>{}(coord.z);
-    return hash_combine(xHash, zHash);
+    return hash_combine(std::hash<int>{}(coord.x),
+                        std::hash<int>{}(coord.z));
 }
 
-ChunkManager::ChunkManager(const WorldGenerator& generator,
-                           int viewDistance,
-                           std::size_t maxLoadsPerUpdate)
+ChunkManager::ChunkManager(const WorldGenerator& generator, int viewDistance)
     : generator_(generator),
-      viewDistance_(std::clamp(viewDistance, 0, kMaximumViewDistance)),
-      maxLoadsPerUpdate_(std::max<std::size_t>(1U, maxLoadsPerUpdate)) {}
+      viewDistance_(std::clamp(viewDistance, 0, kMaximumViewDistance)) {
+    // Start only after every queue, mutex, and condition-variable member has
+    // completed construction; the worker immediately waits on queueCv_.
+    worker_ = std::thread(&ChunkManager::worker_loop, this);
+}
 
 ChunkManager::~ChunkManager() {
     cleanup();
@@ -57,15 +44,28 @@ std::int64_t ChunkManager::floor_div(std::int64_t value,
     return remainder < 0 ? quotient - 1 : quotient;
 }
 
+bool ChunkManager::within_unload_range(
+    int chunkX, int chunkZ, int cameraChunkX, int cameraChunkZ
+) const noexcept {
+    const std::int64_t threshold =
+        static_cast<std::int64_t>(viewDistance_) + kUnloadHysteresis;
+    const std::int64_t dx =
+        std::llabs(static_cast<std::int64_t>(chunkX) - cameraChunkX);
+    const std::int64_t dz =
+        std::llabs(static_cast<std::int64_t>(chunkZ) - cameraChunkZ);
+    return dx <= threshold && dz <= threshold;
+}
+
 void ChunkManager::update(float cameraWorldX, float cameraWorldZ) {
-    if (!std::isfinite(cameraWorldX) || !std::isfinite(cameraWorldZ)) {
+    if (cleanedUp_ || !std::isfinite(cameraWorldX) ||
+        !std::isfinite(cameraWorldZ)) {
         return;
     }
 
     const double cameraChunkX =
-        std::floor(static_cast<double>(cameraWorldX) / kChunkSize);
+        std::floor(static_cast<double>(cameraWorldX) / kChunkSizeX);
     const double cameraChunkZ =
-        std::floor(static_cast<double>(cameraWorldZ) / kChunkSize);
+        std::floor(static_cast<double>(cameraWorldZ) / kChunkSizeZ);
     if (cameraChunkX < std::numeric_limits<int>::min() ||
         cameraChunkX > std::numeric_limits<int>::max() ||
         cameraChunkZ < std::numeric_limits<int>::min() ||
@@ -75,89 +75,213 @@ void ChunkManager::update(float cameraWorldX, float cameraWorldZ) {
 
     const int cameraCX = static_cast<int>(cameraChunkX);
     const int cameraCZ = static_cast<int>(cameraChunkZ);
-    std::vector<ChunkCoord> columnsToRemesh;
-    std::vector<ChunkCoord> loadedColumns;
+    bool topologyChanged = false;
 
-    unload_distant_chunks(cameraCX, cameraCZ, columnsToRemesh);
-    load_chunks_around(cameraCX, cameraCZ, loadedColumns);
+    prune_stale_requests(cameraCX, cameraCZ);
+    unload_distant_chunks(cameraCX, cameraCZ, topologyChanged);
+    collect_ready_chunks(cameraCX, cameraCZ, topologyChanged);
+    enqueue_missing_chunks(cameraCX, cameraCZ);
 
-    for (const ChunkCoord& loaded : loadedColumns) {
-        columnsToRemesh.push_back(loaded);
-        append_neighbor(columnsToRemesh, static_cast<std::int64_t>(loaded.x) - 1, loaded.z);
-        append_neighbor(columnsToRemesh, static_cast<std::int64_t>(loaded.x) + 1, loaded.z);
-        append_neighbor(columnsToRemesh, loaded.x, static_cast<std::int64_t>(loaded.z) - 1);
-        append_neighbor(columnsToRemesh, loaded.x, static_cast<std::int64_t>(loaded.z) + 1);
-    }
-
-    if (!columnsToRemesh.empty()) {
-        rebuild_meshes_around(columnsToRemesh);
-        combined_mesh_dirty_ = true;
-        ++mesh_revision_;
+    const bool meshChanged = build_dirty_meshes();
+    if (topologyChanged || meshChanged) {
+        ++meshRevision_;
     }
 }
 
 void ChunkManager::cleanup() noexcept {
+    if (cleanedUp_) return;
+    cleanedUp_ = true;
+
+    {
+        std::lock_guard<std::mutex> lock(queueMutex_);
+        stopping_ = true;
+        pendingQueue_.clear();
+        readyQueue_.clear();
+        pendingSet_.clear();
+    }
+    queueCv_.notify_all();
+
+    if (worker_.joinable()) {
+        worker_.join();
+    }
+
     chunks_.clear();
-    combined_mesh_.clear();
-    combined_mesh_dirty_ = false;
-    ++mesh_revision_;
+    dirtyQueue_.clear();
+    dirtySet_.clear();
+    ++meshRevision_;
+}
+
+const convergence::Chunk* ChunkManager::getChunk(
+    int chunkX, int chunkZ
+) const noexcept {
+    const auto found = chunks_.find({chunkX, chunkZ});
+    return found == chunks_.end() ? nullptr : found->second.get();
 }
 
 bool ChunkManager::is_chunk_loaded(int chunkX, int chunkZ) const noexcept {
-    return chunks_.find({chunkX, chunkZ}) != chunks_.end();
+    return getChunk(chunkX, chunkZ) != nullptr;
 }
 
 std::size_t ChunkManager::loaded_chunk_count() const noexcept {
     return chunks_.size();
 }
 
-std::uint8_t ChunkManager::get_world_block(int worldX, int worldY,
-                                           int worldZ) const noexcept {
+std::size_t ChunkManager::pending_generation_count() const noexcept {
+    std::lock_guard<std::mutex> lock(queueMutex_);
+    return pendingSet_.size();
+}
+
+std::size_t ChunkManager::pending_mesh_count() const noexcept {
+    return dirtySet_.size();
+}
+
+bool ChunkManager::worker_running() const noexcept {
+    std::lock_guard<std::mutex> lock(queueMutex_);
+    return !stopping_ && worker_.joinable();
+}
+
+std::uint8_t ChunkManager::get_world_block(
+    int worldX, int worldY, int worldZ
+) const noexcept {
     return get_world_block64(worldX, worldY, worldZ);
 }
 
-const std::vector<convergence::Vertex>& ChunkManager::mesh_vertices() const {
-    if (combined_mesh_dirty_) {
-        rebuild_combined_mesh();
+std::vector<ChunkMeshView> ChunkManager::chunk_meshes() const {
+    std::vector<ChunkMeshView> views;
+    views.reserve(chunks_.size());
+    for (const auto& entry : chunks_) {
+        views.push_back({
+            entry.first,
+            &entry.second->mesh_vertices(),
+            entry.second->mesh_revision()
+        });
     }
-    return combined_mesh_;
+    std::sort(views.begin(), views.end(),
+              [](const ChunkMeshView& lhs, const ChunkMeshView& rhs) {
+                  return lhs.coord.x == rhs.coord.x
+                      ? lhs.coord.z < rhs.coord.z
+                      : lhs.coord.x < rhs.coord.x;
+              });
+    return views;
 }
 
 std::uint64_t ChunkManager::mesh_revision() const noexcept {
-    return mesh_revision_;
+    return meshRevision_;
 }
 
 int ChunkManager::view_distance() const noexcept {
     return viewDistance_;
 }
 
-void ChunkManager::unload_distant_chunks(
-    int cameraChunkX, int cameraChunkZ,
-    std::vector<ChunkCoord>& columnsToRemesh) {
-    const std::int64_t threshold =
-        static_cast<std::int64_t>(viewDistance_) + kUnloadHysteresis;
+void ChunkManager::worker_loop() noexcept {
+    for (;;) {
+        ChunkCoord coord{};
+        {
+            std::unique_lock<std::mutex> lock(queueMutex_);
+            queueCv_.wait(lock, [this] {
+                return stopping_ || !pendingQueue_.empty();
+            });
 
-    for (auto it = chunks_.begin(); it != chunks_.end();) {
-        const std::int64_t dx =
-            std::llabs(static_cast<std::int64_t>(it->first.x) - cameraChunkX);
-        const std::int64_t dz =
-            std::llabs(static_cast<std::int64_t>(it->first.z) - cameraChunkZ);
-        if (dx > threshold || dz > threshold) {
-            const ChunkCoord removed = it->first;
-            append_neighbor(columnsToRemesh, static_cast<std::int64_t>(removed.x) - 1, removed.z);
-            append_neighbor(columnsToRemesh, static_cast<std::int64_t>(removed.x) + 1, removed.z);
-            append_neighbor(columnsToRemesh, removed.x, static_cast<std::int64_t>(removed.z) - 1);
-            append_neighbor(columnsToRemesh, removed.x, static_cast<std::int64_t>(removed.z) + 1);
-            it = chunks_.erase(it);
+            if (stopping_) return;
+
+            coord = pendingQueue_.front();
+            pendingQueue_.pop_front();
+            // Keep coord in pendingSet_ while in flight; this prevents
+            // duplicate work from being queued before its result is collected.
+        }
+
+        try {
+            convergence::ChunkData data{};
+            data.chunk_x = coord.x;
+            data.chunk_z = coord.z;
+            generator_.generateChunk(coord.x, coord.z, data.blocks.data());
+
+            std::lock_guard<std::mutex> lock(queueMutex_);
+            if (stopping_) return;
+            readyQueue_.push_back(std::move(data));
+        } catch (...) {
+            // A failed allocation/generation request is made retryable. Never
+            // let an exception escape the worker thread and terminate the app.
+            std::lock_guard<std::mutex> lock(queueMutex_);
+            pendingSet_.erase(coord);
+        }
+    }
+}
+
+void ChunkManager::prune_stale_requests(
+    int cameraChunkX, int cameraChunkZ) {
+    std::lock_guard<std::mutex> lock(queueMutex_);
+
+    for (auto it = pendingQueue_.begin(); it != pendingQueue_.end();) {
+        if (!within_unload_range(it->x, it->z, cameraChunkX, cameraChunkZ)) {
+            pendingSet_.erase(*it);
+            it = pendingQueue_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+
+    for (auto it = readyQueue_.begin(); it != readyQueue_.end();) {
+        if (!within_unload_range(it->chunk_x, it->chunk_z,
+                                 cameraChunkX, cameraChunkZ)) {
+            pendingSet_.erase({it->chunk_x, it->chunk_z});
+            it = readyQueue_.erase(it);
         } else {
             ++it;
         }
     }
 }
 
-void ChunkManager::load_chunks_around(
-    int cameraChunkX, int cameraChunkZ,
-    std::vector<ChunkCoord>& loadedColumns) {
+void ChunkManager::unload_distant_chunks(
+    int cameraChunkX, int cameraChunkZ, bool& topologyChanged) {
+    for (auto it = chunks_.begin(); it != chunks_.end();) {
+        if (!within_unload_range(it->first.x, it->first.z,
+                                 cameraChunkX, cameraChunkZ)) {
+            const ChunkCoord removed = it->first;
+            it = chunks_.erase(it);
+            mark_neighbors_dirty(removed.x, removed.z);
+            topologyChanged = true;
+        } else {
+            ++it;
+        }
+    }
+}
+
+void ChunkManager::collect_ready_chunks(
+    int cameraChunkX, int cameraChunkZ, bool& topologyChanged) {
+    std::deque<convergence::ChunkData> completed;
+    {
+        std::lock_guard<std::mutex> lock(queueMutex_);
+        const std::size_t count =
+            std::min(kCompletedPerUpdate, readyQueue_.size());
+        for (std::size_t i = 0; i < count; ++i) {
+            completed.push_back(std::move(readyQueue_.front()));
+            pendingSet_.erase({
+                completed.back().chunk_x, completed.back().chunk_z});
+            readyQueue_.pop_front();
+        }
+    }
+
+    for (convergence::ChunkData& data : completed) {
+        if (!within_unload_range(data.chunk_x, data.chunk_z,
+                                 cameraChunkX, cameraChunkZ)) {
+            continue;
+        }
+
+        const ChunkCoord coord{data.chunk_x, data.chunk_z};
+        if (chunks_.find(coord) != chunks_.end()) {
+            continue;
+        }
+
+        auto chunk = std::make_unique<convergence::Chunk>(std::move(data));
+        chunks_.emplace(coord, std::move(chunk));
+        mark_neighbors_dirty(coord.x, coord.z);
+        topologyChanged = true;
+    }
+}
+
+void ChunkManager::enqueue_missing_chunks(
+    int cameraChunkX, int cameraChunkZ) {
     struct Candidate {
         ChunkCoord coord;
         std::int64_t distanceSquared;
@@ -184,9 +308,7 @@ void ChunkManager::load_chunks_around(
 
             const ChunkCoord coord{
                 static_cast<int>(x), static_cast<int>(z)};
-            if (chunks_.find(coord) != chunks_.end()) {
-                continue;
-            }
+            if (chunks_.find(coord) != chunks_.end()) continue;
 
             const std::int64_t dx = x - cameraChunkX;
             const std::int64_t dz = z - cameraChunkZ;
@@ -205,120 +327,119 @@ void ChunkManager::load_chunks_around(
                   return lhs.coord.z < rhs.coord.z;
               });
 
-    const std::size_t loadCount =
-        std::min(maxLoadsPerUpdate_, candidates.size());
-    std::array<std::uint8_t, convergence::Chunk::kBlockCount> blocks{};
+    bool notifyWorker = false;
+    {
+        std::lock_guard<std::mutex> lock(queueMutex_);
+        if (stopping_) return;
 
-    for (std::size_t candidateIndex = 0;
-         candidateIndex < loadCount; ++candidateIndex) {
-        const ChunkCoord coord = candidates[candidateIndex].coord;
-        auto column = std::make_unique<ChunkColumn>();
-        auto inserted = chunks_.emplace(coord, std::move(column));
-        if (!inserted.second) {
-            continue;
-        }
+        // Re-prioritize queued work around the player's latest position.
+        std::sort(pendingQueue_.begin(), pendingQueue_.end(),
+                  [cameraChunkX, cameraChunkZ](const ChunkCoord& lhs,
+                                               const ChunkCoord& rhs) {
+            const std::int64_t lhsDx = static_cast<std::int64_t>(lhs.x) - cameraChunkX;
+            const std::int64_t lhsDz = static_cast<std::int64_t>(lhs.z) - cameraChunkZ;
+            const std::int64_t rhsDx = static_cast<std::int64_t>(rhs.x) - cameraChunkX;
+            const std::int64_t rhsDz = static_cast<std::int64_t>(rhs.z) - cameraChunkZ;
+            const std::int64_t lhsDistance = lhsDx * lhsDx + lhsDz * lhsDz;
+            const std::int64_t rhsDistance = rhsDx * rhsDx + rhsDz * rhsDz;
+            if (lhsDistance != rhsDistance) return lhsDistance < rhsDistance;
+            if (lhs.x != rhs.x) return lhs.x < rhs.x;
+            return lhs.z < rhs.z;
+        });
 
-        ChunkColumn& loaded = *inserted.first->second;
-        for (int sectionY = 0;
-             sectionY < kVerticalSectionCount; ++sectionY) {
-            generator_.generateChunk(
-                coord.x, sectionY, coord.z, blocks.data());
-            convergence::Chunk& section = loaded.sections[
-                static_cast<std::size_t>(sectionY)];
-
-            for (int x = 0; x < kChunkSize; ++x) {
-                for (int y = 0; y < kChunkSize; ++y) {
-                    for (int z = 0; z < kChunkSize; ++z) {
-                        const std::size_t index =
-                            (static_cast<std::size_t>(x) * kChunkSize + y) *
-                                kChunkSize + z;
-                        const std::uint8_t block = blocks[index];
-                        if (block != convergence::Chunk::kAir) {
-                            (void)section.set_block(x, y, z, block);
-                        }
-                    }
-                }
+        const std::size_t queueCapacity =
+            kMaximumQueuedRequests > pendingSet_.size()
+                ? kMaximumQueuedRequests - pendingSet_.size()
+                : 0U;
+        const std::size_t requestBudget =
+            std::min(kRequestsPerUpdate, queueCapacity);
+        std::size_t enqueued = 0U;
+        for (const Candidate& candidate : candidates) {
+            if (enqueued >= requestBudget) break;
+            const ChunkCoord coord = candidate.coord;
+            if (pendingSet_.insert(coord).second) {
+                pendingQueue_.push_back(coord);
+                ++enqueued;
+                notifyWorker = true;
             }
         }
+    }
 
-        loadedColumns.push_back(coord);
+    if (notifyWorker) queueCv_.notify_one();
+}
+
+void ChunkManager::mark_chunk_dirty(int chunkX, int chunkZ) {
+    const ChunkCoord coord{chunkX, chunkZ};
+    const auto found = chunks_.find(coord);
+    if (found == chunks_.end()) return;
+
+    found->second->mark_dirty();
+    if (dirtySet_.insert(coord).second) {
+        dirtyQueue_.push_back(coord);
     }
 }
 
-void ChunkManager::rebuild_meshes_around(
-    const std::vector<ChunkCoord>& columnsToRemesh) {
-    std::unordered_set<ChunkCoord, ChunkCoordHash> unique;
-    unique.reserve(columnsToRemesh.size());
-    for (const ChunkCoord& coord : columnsToRemesh) {
-        if (chunks_.find(coord) != chunks_.end()) {
-            unique.insert(coord);
+void ChunkManager::mark_neighbors_dirty(int chunkX, int chunkZ) {
+    mark_chunk_dirty(chunkX, chunkZ);
+
+    const auto mark_if_representable = [this](std::int64_t x,
+                                               std::int64_t z) {
+        if (x < std::numeric_limits<int>::min() ||
+            x > std::numeric_limits<int>::max() ||
+            z < std::numeric_limits<int>::min() ||
+            z > std::numeric_limits<int>::max()) return;
+        mark_chunk_dirty(static_cast<int>(x), static_cast<int>(z));
+    };
+
+    mark_if_representable(static_cast<std::int64_t>(chunkX) - 1, chunkZ);
+    mark_if_representable(static_cast<std::int64_t>(chunkX) + 1, chunkZ);
+    mark_if_representable(chunkX, static_cast<std::int64_t>(chunkZ) - 1);
+    mark_if_representable(chunkX, static_cast<std::int64_t>(chunkZ) + 1);
+}
+
+bool ChunkManager::build_dirty_meshes() {
+    std::size_t built = 0U;
+    while (built < kMeshesPerUpdate && !dirtyQueue_.empty()) {
+        const ChunkCoord coord = dirtyQueue_.front();
+        dirtyQueue_.pop_front();
+        dirtySet_.erase(coord);
+
+        const auto found = chunks_.find(coord);
+        if (found == chunks_.end() || !found->second->is_dirty()) {
+            continue;
         }
-    }
 
-    std::vector<ChunkCoord> ordered(unique.begin(), unique.end());
-    std::sort(ordered.begin(), ordered.end(),
-              [](const ChunkCoord& lhs, const ChunkCoord& rhs) {
-                  return lhs.x == rhs.x ? lhs.z < rhs.z : lhs.x < rhs.x;
-              });
-
-    for (const ChunkCoord& coord : ordered) {
         rebuild_column_mesh(coord.x, coord.z);
+        ++built;
     }
+    return built > 0U;
 }
 
 void ChunkManager::rebuild_column_mesh(int chunkX, int chunkZ) {
     const auto found = chunks_.find({chunkX, chunkZ});
-    if (found == chunks_.end()) {
-        return;
-    }
+    if (found == chunks_.end()) return;
 
-    ChunkColumn& column = *found->second;
-    column.mesh_vertices.clear();
+    const auto neighborLookup =
+        [this, chunkX, chunkZ](int localX, int y, int localZ) {
+            const std::int64_t worldX =
+                static_cast<std::int64_t>(chunkX) * kChunkSizeX + localX;
+            const std::int64_t worldZ =
+                static_cast<std::int64_t>(chunkZ) * kChunkSizeZ + localZ;
+            return get_world_block64(worldX, y, worldZ);
+        };
 
-    for (int sectionY = 0;
-         sectionY < kVerticalSectionCount; ++sectionY) {
-        convergence::Chunk& section = column.sections[
-            static_cast<std::size_t>(sectionY)];
-
-        const auto neighborLookup =
-            [this, chunkX, chunkZ, sectionY](
-                int localX, int localY, int localZ) -> std::uint8_t {
-                const std::int64_t worldX =
-                    static_cast<std::int64_t>(chunkX) * kChunkSize + localX;
-                const std::int64_t worldY =
-                    static_cast<std::int64_t>(sectionY) * kChunkSize + localY;
-                const std::int64_t worldZ =
-                    static_cast<std::int64_t>(chunkZ) * kChunkSize + localZ;
-                return get_world_block64(worldX, worldY, worldZ);
-            };
-
-        section.build_mesh(neighborLookup);
-        const auto& sectionVertices = section.mesh_vertices();
-        column.mesh_vertices.reserve(
-            column.mesh_vertices.size() + sectionVertices.size());
-
-        for (const convergence::Vertex& localVertex : sectionVertices) {
-            convergence::Vertex worldVertex = localVertex;
-            worldVertex.x += static_cast<float>(
-                static_cast<std::int64_t>(chunkX) * kChunkSize);
-            worldVertex.y += static_cast<float>(sectionY * kChunkSize);
-            worldVertex.z += static_cast<float>(
-                static_cast<std::int64_t>(chunkZ) * kChunkSize);
-            column.mesh_vertices.push_back(worldVertex);
-        }
-    }
+    found->second->build_mesh(neighborLookup);
 }
 
 std::uint8_t ChunkManager::get_world_block64(
     std::int64_t worldX, std::int64_t worldY,
     std::int64_t worldZ) const noexcept {
-    if (worldY < 0 ||
-        worldY >= static_cast<std::int64_t>(kVerticalSectionCount) * kChunkSize) {
+    if (worldY < 0 || worldY >= cvg::SY) {
         return convergence::Chunk::kAir;
     }
 
-    const std::int64_t chunkX64 = floor_div(worldX, kChunkSize);
-    const std::int64_t chunkZ64 = floor_div(worldZ, kChunkSize);
+    const std::int64_t chunkX64 = floor_div(worldX, kChunkSizeX);
+    const std::int64_t chunkZ64 = floor_div(worldZ, kChunkSizeZ);
     if (chunkX64 < std::numeric_limits<int>::min() ||
         chunkX64 > std::numeric_limits<int>::max() ||
         chunkZ64 < std::numeric_limits<int>::min() ||
@@ -328,47 +449,12 @@ std::uint8_t ChunkManager::get_world_block64(
 
     const int chunkX = static_cast<int>(chunkX64);
     const int chunkZ = static_cast<int>(chunkZ64);
-    const int localX = static_cast<int>(worldX - chunkX64 * kChunkSize);
-    const int localZ = static_cast<int>(worldZ - chunkZ64 * kChunkSize);
-    const int sectionY = static_cast<int>(worldY / kChunkSize);
-    const int localY = static_cast<int>(worldY % kChunkSize);
+    const int localX = static_cast<int>(worldX - chunkX64 * kChunkSizeX);
+    const int localZ = static_cast<int>(worldZ - chunkZ64 * kChunkSizeZ);
 
-    const auto found = chunks_.find({chunkX, chunkZ});
-    if (found == chunks_.end()) {
-        return convergence::Chunk::kAir;
-    }
-
-    return found->second->sections[static_cast<std::size_t>(sectionY)]
-        .block_at(localX, localY, localZ);
+    const convergence::Chunk* chunk = getChunk(chunkX, chunkZ);
+    return chunk != nullptr
+        ? chunk->block_at(localX, static_cast<int>(worldY), localZ)
+        : convergence::Chunk::kAir;
 }
 
-void ChunkManager::rebuild_combined_mesh() const {
-    combined_mesh_.clear();
-
-    std::size_t totalVertices = 0U;
-    for (const auto& entry : chunks_) {
-        totalVertices += entry.second->mesh_vertices.size();
-    }
-
-    combined_mesh_.reserve(totalVertices);
-    // Iterate the coordinate map order for deterministic mesh ordering.
-    std::vector<std::pair<ChunkCoord, const ChunkColumn*>> coordinateOrder;
-    coordinateOrder.reserve(chunks_.size());
-    for (const auto& entry : chunks_) {
-        coordinateOrder.push_back({entry.first, entry.second.get()});
-    }
-    std::sort(coordinateOrder.begin(), coordinateOrder.end(),
-              [](const auto& lhs, const auto& rhs) {
-                  return lhs.first.x == rhs.first.x
-                      ? lhs.first.z < rhs.first.z
-                      : lhs.first.x < rhs.first.x;
-              });
-
-    for (const auto& entry : coordinateOrder) {
-        const auto& vertices = entry.second->mesh_vertices;
-        combined_mesh_.insert(
-            combined_mesh_.end(), vertices.begin(), vertices.end());
-    }
-
-    combined_mesh_dirty_ = false;
-}

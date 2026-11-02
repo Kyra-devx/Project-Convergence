@@ -10,17 +10,20 @@
 #include "convergence/chunk.hpp"
 
 #include <algorithm>
-#include <array>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <cmath>
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <unordered_map>
+#include <unordered_set>
 #include <string>
 #include <sys/types.h>
 #include <vector>
 
+#include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
 
 namespace {
@@ -31,14 +34,18 @@ constexpr float kMaxDeltaTimeSeconds = 0.1F;
 std::unique_ptr<WorldGenerator> g_world_generator;
 std::unique_ptr<ChunkManager> g_chunk_manager;
 std::unique_ptr<Camera> g_camera;
-std::uint64_t g_uploaded_mesh_revision =
-    std::numeric_limits<std::uint64_t>::max();
+
+struct GpuChunkMesh {
+    GLuint vao = 0;
+    GLuint vbo = 0;
+    GLsizei vertex_count = 0;
+    std::uint64_t mesh_revision = 0U;
+};
+
+std::unordered_map<ChunkCoord, GpuChunkMesh, ChunkCoordHash> g_gpu_chunks;
 
 GLuint g_program = 0;
-GLuint g_vao = 0;
-GLuint g_vbo = 0;
 GLint g_mvp_location = -1;
-GLsizei g_vertex_count = 0;
 
 std::atomic<jlong> g_last_frame_time_ms{0};
 
@@ -182,68 +189,176 @@ GLuint create_program(AAssetManager* manager) {
     return 0;
 }
 
-bool upload_chunk_mesh() {
+void delete_gpu_chunk(GpuChunkMesh& mesh) noexcept {
+    if (mesh.vbo != 0) {
+        glDeleteBuffers(1, &mesh.vbo);
+        mesh.vbo = 0;
+    }
+    if (mesh.vao != 0) {
+        glDeleteVertexArrays(1, &mesh.vao);
+        mesh.vao = 0;
+    }
+    mesh.vertex_count = 0;
+}
+
+void cleanup_gpu_chunks() noexcept {
+    for (auto& entry : g_gpu_chunks) {
+        delete_gpu_chunk(entry.second);
+    }
+    g_gpu_chunks.clear();
+}
+
+bool upload_changed_chunk_meshes() {
     if (g_chunk_manager == nullptr) {
         return false;
     }
 
-    const std::vector<convergence::Vertex>& vertices =
-        g_chunk_manager->mesh_vertices();
-    if (vertices.size() >
-        static_cast<std::size_t>(std::numeric_limits<GLsizei>::max())) {
-        log_error("Chunk mesh exceeds the OpenGL draw vertex-count limit.");
-        g_vertex_count = 0;
-        return false;
+    const std::vector<ChunkMeshView> views = g_chunk_manager->chunk_meshes();
+    std::unordered_set<ChunkCoord, ChunkCoordHash> activeChunks;
+    activeChunks.reserve(views.size());
+
+    bool uploadSucceeded = true;
+    for (const ChunkMeshView& view : views) {
+        activeChunks.insert(view.coord);
+        if (view.vertices == nullptr) {
+            uploadSucceeded = false;
+            continue;
+        }
+
+        const std::vector<convergence::Vertex>& vertices = *view.vertices;
+        auto existing = g_gpu_chunks.find(view.coord);
+
+        if (vertices.empty()) {
+            if (existing != g_gpu_chunks.end()) {
+                existing->second.vertex_count = 0;
+                existing->second.mesh_revision = view.revision;
+            }
+            continue;
+        }
+
+        if (vertices.size() >
+            static_cast<std::size_t>(std::numeric_limits<GLsizei>::max())) {
+            log_error("Chunk exceeds the OpenGL draw vertex-count limit.");
+            uploadSucceeded = false;
+            continue;
+        }
+        if (vertices.size() >
+            static_cast<std::size_t>(std::numeric_limits<GLsizeiptr>::max()) /
+                sizeof(convergence::Vertex)) {
+            log_error("Chunk exceeds the OpenGL buffer-size limit.");
+            uploadSucceeded = false;
+            continue;
+        }
+
+        if (existing != g_gpu_chunks.end() &&
+            existing->second.mesh_revision == view.revision) {
+            continue;
+        }
+
+        if (existing == g_gpu_chunks.end()) {
+            existing = g_gpu_chunks.emplace(view.coord, GpuChunkMesh{}).first;
+        }
+
+        GpuChunkMesh& gpu = existing->second;
+        if (gpu.vao == 0) {
+            glGenVertexArrays(1, &gpu.vao);
+        }
+        if (gpu.vbo == 0) {
+            glGenBuffers(1, &gpu.vbo);
+        }
+        if (gpu.vao == 0 || gpu.vbo == 0) {
+            log_error("Failed to allocate a chunk VAO/VBO.");
+            uploadSucceeded = false;
+            continue;
+        }
+
+        glBindVertexArray(gpu.vao);
+        glBindBuffer(GL_ARRAY_BUFFER, gpu.vbo);
+        glBufferData(
+            GL_ARRAY_BUFFER,
+            static_cast<GLsizeiptr>(
+                vertices.size() * sizeof(convergence::Vertex)),
+            vertices.data(),
+            GL_DYNAMIC_DRAW
+        );
+
+        glVertexAttribPointer(
+            0, 3, GL_FLOAT, GL_FALSE,
+            static_cast<GLsizei>(sizeof(convergence::Vertex)),
+            reinterpret_cast<const void*>(offsetof(convergence::Vertex, x))
+        );
+        glEnableVertexAttribArray(0);
+
+        glVertexAttribPointer(
+            1, 3, GL_FLOAT, GL_FALSE,
+            static_cast<GLsizei>(sizeof(convergence::Vertex)),
+            reinterpret_cast<const void*>(offsetof(convergence::Vertex, nx))
+        );
+        glEnableVertexAttribArray(1);
+
+        glVertexAttribPointer(
+            2, 3, GL_FLOAT, GL_FALSE,
+            static_cast<GLsizei>(sizeof(convergence::Vertex)),
+            reinterpret_cast<const void*>(offsetof(convergence::Vertex, r))
+        );
+        glEnableVertexAttribArray(2);
+
+        glBindVertexArray(0);
+        gpu.vertex_count = static_cast<GLsizei>(vertices.size());
+        gpu.mesh_revision = view.revision;
     }
 
-    if (g_vao == 0) {
-        glGenVertexArrays(1, &g_vao);
-    }
-    if (g_vbo == 0) {
-        glGenBuffers(1, &g_vbo);
-    }
-    if (g_vao == 0 || g_vbo == 0) {
-        log_error("Failed to create the streaming terrain VAO/VBO.");
-        g_vertex_count = 0;
-        return false;
-    }
-    if (vertices.size() > static_cast<std::size_t>(
-            std::numeric_limits<GLsizeiptr>::max()) / sizeof(convergence::Vertex)) {
-        log_error("Chunk mesh exceeds the OpenGL buffer-size limit.");
-        g_vertex_count = 0;
-        return false;
+    // Remove GPU resources for columns unloaded by ChunkManager.
+    for (auto it = g_gpu_chunks.begin(); it != g_gpu_chunks.end();) {
+        if (activeChunks.find(it->first) == activeChunks.end()) {
+            delete_gpu_chunk(it->second);
+            it = g_gpu_chunks.erase(it);
+        } else {
+            ++it;
+        }
     }
 
-    glBindVertexArray(g_vao);
-    glBindBuffer(GL_ARRAY_BUFFER, g_vbo);
-    glBufferData(
-        GL_ARRAY_BUFFER,
-        static_cast<GLsizeiptr>(vertices.size() * sizeof(convergence::Vertex)),
-        vertices.empty() ? nullptr : vertices.data(),
-        GL_DYNAMIC_DRAW
-    );
+    return uploadSucceeded;
+}
 
-    glVertexAttribPointer(
-        0, 3, GL_FLOAT, GL_FALSE, static_cast<GLsizei>(sizeof(convergence::Vertex)),
-        reinterpret_cast<const void*>(offsetof(convergence::Vertex, x))
-    );
-    glEnableVertexAttribArray(0);
+void render_chunk_meshes(float aspect) {
+    if (g_chunk_manager == nullptr || g_camera == nullptr) {
+        return;
+    }
 
-    glVertexAttribPointer(
-        1, 3, GL_FLOAT, GL_FALSE, static_cast<GLsizei>(sizeof(convergence::Vertex)),
-        reinterpret_cast<const void*>(offsetof(convergence::Vertex, nx))
-    );
-    glEnableVertexAttribArray(1);
+    const float safeAspect = std::max(aspect, 0.001F);
+    const glm::mat4 projection =
+        g_camera->getProjectionMatrix(safeAspect);
+    const glm::mat4 view = g_camera->getViewMatrix();
 
-    glVertexAttribPointer(
-        2, 3, GL_FLOAT, GL_FALSE, static_cast<GLsizei>(sizeof(convergence::Vertex)),
-        reinterpret_cast<const void*>(offsetof(convergence::Vertex, r))
-    );
-    glEnableVertexAttribArray(2);
+    glUseProgram(g_program);
+    const std::vector<ChunkMeshView> meshes = g_chunk_manager->chunk_meshes();
+
+    // Chunk vertex positions are local; apply the X/Z chunk origin per draw.
+    for (const ChunkMeshView& mesh : meshes) {
+        const auto gpu = g_gpu_chunks.find(mesh.coord);
+        if (gpu == g_gpu_chunks.end() ||
+            gpu->second.vao == 0 ||
+            gpu->second.vertex_count <= 0) {
+            continue;
+        }
+
+        const glm::vec3 origin{
+            static_cast<float>(static_cast<std::int64_t>(mesh.coord.x) * cvg::SX),
+            0.0F,
+            static_cast<float>(static_cast<std::int64_t>(mesh.coord.z) * cvg::SZ)
+        };
+        const glm::mat4 model =
+            glm::translate(glm::mat4{1.0F}, origin);
+        const glm::mat4 mvp = projection * view * model;
+
+        glUniformMatrix4fv(
+            g_mvp_location, 1, GL_FALSE, glm::value_ptr(mvp));
+        glBindVertexArray(gpu->second.vao);
+        glDrawArrays(GL_TRIANGLES, 0, gpu->second.vertex_count);
+    }
 
     glBindVertexArray(0);
-    g_vertex_count = static_cast<GLsizei>(vertices.size());
-    return true;
 }
 
 }  // namespace
@@ -254,25 +369,17 @@ Java_com_convergence_voxel_VoxelRenderer_nativeCleanup(
     jobject /* thiz */
 ) {
     // Runs on GLSurfaceView's GL thread while its EGL context is current.
-    if (g_vao != 0) {
-        glDeleteVertexArrays(1, &g_vao);
-        g_vao = 0;
-    }
-    if (g_vbo != 0) {
-        glDeleteBuffers(1, &g_vbo);
-        g_vbo = 0;
-    }
+    // Stop and join the CPU worker before releasing its immutable generator.
+    g_chunk_manager.reset();
+    g_world_generator.reset();
+    cleanup_gpu_chunks();
     if (g_program != 0) {
         glDeleteProgram(g_program);
         g_program = 0;
     }
 
     g_mvp_location = -1;
-    g_vertex_count = 0;
     g_last_frame_time_ms.store(0);
-    g_chunk_manager.reset();  // Release chunk columns before their generator.
-    g_world_generator.reset();
-    g_uploaded_mesh_revision = std::numeric_limits<std::uint64_t>::max();
     g_camera.reset();
 
     std::lock_guard<std::mutex> lock(g_input_mutex);
@@ -285,17 +392,17 @@ Java_com_convergence_voxel_VoxelRenderer_nativeInit(
     jobject /* thiz */,
     jobject asset_manager
 ) {
-    // This callback runs on GLSurfaceView's GL thread. Recreate GL resources
-    // whenever Android creates a new EGL context.
-    g_program = 0;
-    g_vao = 0;
-    g_vbo = 0;
-    g_vertex_count = 0;
+    // This callback runs on GLSurfaceView's GL thread. Release any previous
+    // runtime before recreating resources for a new EGL context.
+    g_chunk_manager.reset();  // Joins the CPU worker before its generator is released.
+    g_world_generator.reset();
+    cleanup_gpu_chunks();
+    if (g_program != 0) {
+        glDeleteProgram(g_program);
+        g_program = 0;
+    }
     g_mvp_location = -1;
     g_last_frame_time_ms.store(0);
-    g_chunk_manager.reset();
-    g_world_generator.reset();
-    g_uploaded_mesh_revision = std::numeric_limits<std::uint64_t>::max();
 
     {
         std::lock_guard<std::mutex> lock(g_input_mutex);
@@ -335,8 +442,7 @@ Java_com_convergence_voxel_VoxelRenderer_nativeInit(
 
     constexpr std::int64_t kWorldSeed = 12345;
     g_world_generator = std::make_unique<WorldGenerator>(kWorldSeed);
-    g_chunk_manager = std::make_unique<ChunkManager>(
-        *g_world_generator, 4, ChunkManager::kDefaultLoadBudgetPerUpdate);
+    g_chunk_manager = std::make_unique<ChunkManager>(*g_world_generator, 4);
     __android_log_print(ANDROID_LOG_INFO, kLogTag,
                         "Chunk streaming initialized: seed=%lld, viewDistance=4.",
                         static_cast<long long>(kWorldSeed));
@@ -422,29 +528,18 @@ Java_com_convergence_voxel_VoxelRenderer_nativeRender(
 
     g_camera->processLook(input.look_dx, input.look_dy);
     g_camera->processMovement(
-        input.joy_forward, input.joy_strafe, delta_time,
-        *g_world_generator);
+        input.joy_forward, input.joy_strafe, delta_time);
 
-    // Load the nearest missing columns incrementally to limit frame spikes.
+    // Sample the same heightmap as generation on the GL thread. This keeps
+    // Camera independent from WorldGenerator and retains the B.4 floor clamp.
+    const float terrainHeight = g_world_generator->getTerrainHeight(
+        std::floor(g_camera->position.x),
+        std::floor(g_camera->position.z));
+    g_camera->applyGroundCollision(terrainHeight);
+
+    // Worker output is collected and CPU meshes are built on this GL thread.
     g_chunk_manager->update(g_camera->position.x, g_camera->position.z);
-    const std::uint64_t currentMeshRevision =
-        g_chunk_manager->mesh_revision();
-    if (currentMeshRevision != g_uploaded_mesh_revision) {
-        if (upload_chunk_mesh()) {
-            g_uploaded_mesh_revision = currentMeshRevision;
-        }
-    }
-    if (g_vao == 0 || g_vertex_count <= 0) {
-        return;
-    }
-
-    const float safe_aspect = std::max(aspect, 0.001F);
-    const glm::mat4 mvp =
-        g_camera->getProjectionMatrix(safe_aspect) * g_camera->getViewMatrix();
-
-    glUseProgram(g_program);
-    glUniformMatrix4fv(g_mvp_location, 1, GL_FALSE, glm::value_ptr(mvp));
-    glBindVertexArray(g_vao);
-    glDrawArrays(GL_TRIANGLES, 0, g_vertex_count);
-    glBindVertexArray(0);
+    // Only dirty chunk revisions upload; unchanged chunk VBOs are retained.
+    (void)upload_changed_chunk_meshes();
+    render_chunk_meshes(aspect);
 }

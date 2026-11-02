@@ -52,8 +52,9 @@ The overlay is a transparent Android View above the GLSurfaceView. It captures t
 
 - Camera.h / Camera.cpp: native camera position, yaw, pitch, front vector, look processing, movement, view matrix, and perspective matrix.
 - native-lib.cpp: JNI boundary, GL shader setup, generated terrain mesh upload, input synchronization, delta-time loop, camera updates, and draw call.
-- WorldGenerator.h / WorldGenerator.cpp: seeded height/detail noise, vertical chunk section data, surface layers, and terrain-height sampling.
-- ChunkManager.h / ChunkManager.cpp: signed X/Z chunk coordinates, incremental loading/unloading, vertical section ownership, neighbor lookup, mesh invalidation, and merged CPU geometry.
+- VoxelDims.h: canonical 16 × 128 × 16 chunk dimensions and contiguous block indexing.
+- WorldGenerator.h / WorldGenerator.cpp: seeded height/detail noise, complete 128-block chunk data, surface layers, and terrain-height sampling.
+- ChunkManager.h / ChunkManager.cpp: signed X/Z chunk coordinates, worker lifecycle, bounded pending/ready queues, incremental loading/unloading, neighbor lookup, mesh budget, and merged CPU geometry.
 
 ### app/src/main/assets/shaders/
 
@@ -61,7 +62,7 @@ GLSL ES 3.0 vertex and fragment shaders. Position, normal, and RGB color use att
 
 ### engine/
 
-Portable C++ library with public headers in include/, implementations in src/, native tests in tests/, and CMake build. Chunk is the 16³ CPU mesh-generation unit used by the B.2/B.3 demo.
+Portable C++ library with public headers in include/, implementations in src/, native tests in tests/, and CMake build. Chunk is the CPU mesh-generation unit; B.6 uses 16 × 128 × 16 storage.
 
 ## 4. Camera
 
@@ -76,7 +77,7 @@ Camera uses GLM:
 
 getFrontVector converts yaw/pitch to a normalized direction. getViewMatrix calls glm::lookAt. getProjectionMatrix(aspect) calls glm::perspective with near/far planes 0.1 and 500 world units.
 
-The demo initializes the camera above the generated terrain. Walking uses the horizontal projection of the front vector, so looking up/down does not cause the movement joystick to fly or sink the camera. Gravity advances a vertical velocity each frame; floor collision samples the same deterministic height function used by world generation and clamps the eye to 1.7 world units above the surface. Jumping remains future work.
+The demo initializes the camera above the generated terrain. Walking uses the horizontal projection of the front vector, so looking up/down does not cause the movement joystick to fly or sink the camera. Gravity advances a vertical velocity each frame in Camera; nativeRender samples WorldGenerator height on the GL thread and applies the floor clamp at 1.7 world units above the surface. Jumping remains future work.
 
 GLM is a header-only C++ dependency fetched by CMake from the exact upstream commit corresponding to release 1.0.1. The initial Android native configure requires network access unless the dependency has already been cached.
 
@@ -87,6 +88,8 @@ Touch events originate on Android's UI thread. nativeHandleLook accumulates rela
 A mutex protects the pending input state. On each GL frame, nativeRender takes a snapshot, clears only the accumulated look deltas, and retains joystick values until release. This prevents UI-thread writes from racing with the GL thread's camera update.
 
 All OpenGL calls remain on the thread that owns the current GLSurfaceView EGL context. Native camera updates and rendering also run on that GL thread.
+
+B.6 adds one C++ worker thread owned by ChunkManager. The worker reads the immutable WorldGenerator configuration and writes only a private ChunkData block array. It does not access the chunk map, camera, mesh vertices, JNI input, or OpenGL. Completed data is placed in a mutex-protected ready queue. The GL thread collects at most 6 results per update, inserts them into the chunk map, and marks the new chunk plus loaded cardinal neighbors dirty. A bounded dirty queue builds at most 2 CPU meshes per update. The worker is stopped, notified, and joined before ChunkManager is destroyed and before WorldGenerator is released.
 
 ## 6. Game Loop and Delta Time
 
@@ -109,11 +112,11 @@ The overlay visual is a simple touch indicator, not an interactive HUD system. S
 
 ## 8. World Data, Chunks, and Mesh Generation
 
-Chunk stores 16 × 16 × 16 block IDs. Block ID 0 is air; the prototype also defines grass (1), dirt (2), and stone (3).
+Chunk stores 16 × 128 × 16 block IDs (32,768 bytes) using the shared X-fastest layout in VoxelDims.h. Block ID 0 is air; the prototype also defines grass (1), dirt (2), and stone (3).
 
-The CPU-side mesher skips air, checks six axis-aligned neighbors, omits internal faces adjacent to another solid block, and emits two triangles for each exposed face. An optional neighbor lookup supplies blocks outside the current 16³ section, allowing culling across horizontal chunk boundaries and between vertical terrain sections. Vertices contain position, normal, and RGB color.
+The CPU-side mesher skips air, checks six axis-aligned neighbors, omits internal faces adjacent to another solid block, and emits two triangles for each exposed face. An optional neighbor lookup supplies blocks outside the current 16 × 128 × 16 chunk, allowing culling across horizontal chunk boundaries. Vertices contain position, normal, and RGB color.
 
-When a neighboring column is not loaded, its blocks are treated as air; when it becomes available or is unloaded, the affected columns are remeshed. B.4 uses FastNoiseLite heightmap and detail noise, filling five vertical 16³ sections per X/Z column with stone, dirt, and grass layers. B.5 loads nearest missing X/Z columns incrementally and unloads columns outside the view-distance-plus-hysteresis threshold. A view distance of 4 targets 81 columns (405 cubic sections).
+When a neighboring column is not loaded, its blocks are treated as air; when it becomes available or is unloaded, the affected columns are remeshed. WorldGenerator fills each 16 × 128 × 16 column with stone, dirt, and grass layers. ChunkManager loads the nearest missing X/Z columns incrementally and unloads columns outside the view-distance-plus-hysteresis threshold. A view distance of 4 requests 81 columns; the raw block payload for those columns is 2,654,208 bytes (about 2.53 MiB), excluding mesh and container overhead.
 
 ## 9. Rendering Pipeline
 
@@ -121,13 +124,13 @@ Initial Android baseline: OpenGL ES 3.0.
 
 1. Read vertex/fragment shader assets.
 2. Compile and link shader program.
-3. Initialize WorldGenerator and ChunkManager; load nearby X/Z columns incrementally.
-4. Build CPU meshes with neighbor-aware face culling across X/Z and vertical section boundaries.
-5. Bind position, normal, and color attributes into one reusable VAO/VBO.
-6. On each frame, update Camera and ChunkManager; refresh the merged GPU buffer with GL_DYNAMIC_DRAW only when the mesh revision changes.
-7. Calculate projection × view matrix, upload uMVP, and draw the merged loaded terrain in one call.
+3. Initialize WorldGenerator, ChunkManager, and its single CPU-only worker thread.
+4. The worker generates block arrays for the nearest requested 16 × 128 × 16 columns; it never calls OpenGL.
+5. On the GL thread, collect up to 6 completed arrays and build up to 2 dirty chunk meshes per update with neighbor-aware culling.
+6. Keep one VAO/VBO per loaded chunk. Upload only when that chunk’s mesh revision changes, using GL_DYNAMIC_DRAW.
+7. Update Camera and ChunkManager, calculate projection × view, apply the chunk X/Z model transform, upload uMVP, and draw each ready chunk on the GL thread.
 
-Depth testing and back-face culling remain enabled. Face winding is checked by native tests. ChunkManager maintains per-column CPU meshes and combines them only when its mesh revision changes. The renderer uploads the merged mesh to a reusable VAO/VBO using GL_DYNAMIC_DRAW and issues one draw call. It does not yet include worker-thread generation, frustum culling, greedy meshing, transparent passes, or level-of-detail selection.
+Depth testing and back-face culling remain enabled. Face winding is checked by native tests. ChunkManager maintains CPU meshes per loaded column. The renderer owns a matching VAO/VBO per chunk and uploads only a chunk whose mesh revision changed; unloaded chunk GPU resources are deleted on the GL thread. Draw calls are issued per chunk with an X/Z model translation. Terrain block generation runs on one worker; mesh building (budget 2/update) and GPU upload remain on the GL thread. This avoids repeated full-world buffer uploads but increases draw-call count with the number of loaded chunks. Frustum culling, greedy meshing, transparent passes, and level-of-detail selection are not implemented.
 
 ## 10. Persistence, Compatibility, Security
 
@@ -139,7 +142,7 @@ Do not commit secrets, signing keys, local config, or personal data. Treat world
 
 ## 11. Build and Test Strategy
 
-Portable CMake/CTest: voxel bounds, chunk meshing, and seeded world generation. World-generation tests cover same-seed determinism, different-seed variation, surface material layers, vertical section placement, and air above terrain.
+Portable CMake/CTest: voxel bounds, full-height chunk meshing, seeded 16 × 128 × 16 generation, and asynchronous ChunkManager loading/unloading. Tests cover deterministic block data, seed variation, surface layers, negative chunk coordinates, request completion, dirty-mesh draining, neighbor culling, and worker shutdown. These tests are added but remain NOT_RUN until executed in a suitable build environment.
 
 Android: Gradle app module, CMake native build, emulator/device smoke test, multi-touch test, pause/resume, EGL surface recreation, and profiling while the 81-column view is populated and the player crosses chunk boundaries. Device verification is distinct from source-level implementation and must be recorded separately.
 

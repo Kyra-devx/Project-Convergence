@@ -2,6 +2,8 @@ cmake_minimum_required(VERSION 3.22.1)
 
 project(convergence_android LANGUAGES CXX)
 
+find_package(Threads REQUIRED)
+
 # GLM is header-only. Pin the exact upstream revision for reproducible builds.
 include(FetchContent)
 set(GLM_BUILD_TESTS OFF CACHE BOOL "Disable GLM tests" FORCE)
@@ -42,6 +44,7 @@ target_link_libraries(
     PRIVATE
     convergence_engine
     glm::glm
+    Threads::Threads
     ${android-lib}
     ${log-lib}
     ${gles-lib}
