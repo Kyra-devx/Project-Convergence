@@ -67,9 +67,13 @@ public:
     [[nodiscard]] std::size_t pending_mesh_count() const noexcept;
     [[nodiscard]] bool worker_running() const noexcept;
 
+    // World-space block access; call set_world_block from the GL/render thread.
     [[nodiscard]] std::uint8_t get_world_block(
         int worldX, int worldY, int worldZ
     ) const noexcept;
+    [[nodiscard]] bool set_world_block(
+        int worldX, int worldY, int worldZ, std::uint8_t block
+    );
 
     // Stable, coordinate-sorted views; pointers remain valid until the next update.
     [[nodiscard]] std::vector<ChunkMeshView> chunk_meshes() const;

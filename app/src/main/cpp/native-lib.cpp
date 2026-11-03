@@ -5,6 +5,7 @@
 #include <jni.h>
 
 #include "Camera.h"
+#include "Raycast.h"
 #include "ChunkManager.h"
 #include "WorldGenerator.h"
 #include "convergence/chunk.hpp"
@@ -47,6 +48,14 @@ std::unordered_map<ChunkCoord, GpuChunkMesh, ChunkCoordHash> g_gpu_chunks;
 GLuint g_program = 0;
 GLint g_mvp_location = -1;
 
+GLuint g_highlight_program = 0;
+GLuint g_highlight_vao = 0;
+GLuint g_highlight_vbo = 0;
+GLint g_highlight_mvp_location = -1;
+GLint g_highlight_offset_location = -1;
+RayHit g_current_hit{};
+bool g_has_target = false;
+
 std::atomic<jlong> g_last_frame_time_ms{0};
 
 struct PendingInput {
@@ -54,6 +63,7 @@ struct PendingInput {
     float look_dy = 0.0F;
     float joy_forward = 0.0F;
     float joy_strafe = 0.0F;
+    int pending_action = 0;
 };
 
 std::mutex g_input_mutex;
@@ -136,11 +146,11 @@ GLuint compile_shader(GLenum shader_type, const std::string& source) {
     return 0;
 }
 
-GLuint create_program(AAssetManager* manager) {
-    const std::string vertex_source =
-        read_asset(manager, "shaders/vertex_shader.glsl");
-    const std::string fragment_source =
-        read_asset(manager, "shaders/fragment_shader.glsl");
+GLuint create_program(AAssetManager* manager,
+                      const char* vertex_asset,
+                      const char* fragment_asset) {
+    const std::string vertex_source = read_asset(manager, vertex_asset);
+    const std::string fragment_source = read_asset(manager, fragment_asset);
 
     if (vertex_source.empty() || fragment_source.empty()) {
         return 0;
@@ -187,6 +197,188 @@ GLuint create_program(AAssetManager* manager) {
                         "Shader program link failed: %s", info_log.data());
     glDeleteProgram(program);
     return 0;
+}
+
+
+void cleanup_highlight() noexcept {
+    if (g_highlight_vbo != 0) {
+        glDeleteBuffers(1, &g_highlight_vbo);
+        g_highlight_vbo = 0;
+    }
+    if (g_highlight_vao != 0) {
+        glDeleteVertexArrays(1, &g_highlight_vao);
+        g_highlight_vao = 0;
+    }
+    if (g_highlight_program != 0) {
+        glDeleteProgram(g_highlight_program);
+        g_highlight_program = 0;
+    }
+    g_highlight_mvp_location = -1;
+    g_highlight_offset_location = -1;
+    g_current_hit = {};
+    g_has_target = false;
+}
+
+bool initialize_highlight(AAssetManager* manager) {
+    cleanup_highlight();
+    g_highlight_program = create_program(
+        manager,
+        "shaders/highlight_vertex_shader.glsl",
+        "shaders/highlight_fragment_shader.glsl");
+    if (g_highlight_program == 0) return false;
+
+    g_highlight_mvp_location =
+        glGetUniformLocation(g_highlight_program, "uMVP");
+    g_highlight_offset_location =
+        glGetUniformLocation(g_highlight_program, "uOffset");
+    if (g_highlight_mvp_location < 0 ||
+        g_highlight_offset_location < 0) {
+        log_error("Highlight shader uniforms were not found.");
+        cleanup_highlight();
+        return false;
+    }
+
+    // Slightly expanded cube avoids z-fighting while depth testing hides
+    // edges that are behind the selected block.
+    constexpr GLfloat kOutside = -0.003F;
+    constexpr GLfloat kInside = 1.003F;
+    constexpr GLfloat cubeLines[] = {
+        kOutside,kOutside,kOutside, kInside,kOutside,kOutside,
+        kInside,kOutside,kOutside, kInside,kOutside,kInside,
+        kInside,kOutside,kInside, kOutside,kOutside,kInside,
+        kOutside,kOutside,kInside, kOutside,kOutside,kOutside,
+
+        kOutside,kInside,kOutside, kInside,kInside,kOutside,
+        kInside,kInside,kOutside, kInside,kInside,kInside,
+        kInside,kInside,kInside, kOutside,kInside,kInside,
+        kOutside,kInside,kInside, kOutside,kInside,kOutside,
+
+        kOutside,kOutside,kOutside, kOutside,kInside,kOutside,
+        kInside,kOutside,kOutside, kInside,kInside,kOutside,
+        kInside,kOutside,kInside, kInside,kInside,kInside,
+        kOutside,kOutside,kInside, kOutside,kInside,kInside
+    };
+
+    glGenVertexArrays(1, &g_highlight_vao);
+    glGenBuffers(1, &g_highlight_vbo);
+    if (g_highlight_vao == 0 || g_highlight_vbo == 0) {
+        log_error("Failed to allocate highlight VAO/VBO.");
+        cleanup_highlight();
+        return false;
+    }
+
+    glBindVertexArray(g_highlight_vao);
+    glBindBuffer(GL_ARRAY_BUFFER, g_highlight_vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(cubeLines), cubeLines, GL_STATIC_DRAW);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 0, nullptr);
+    glEnableVertexAttribArray(0);
+    glBindVertexArray(0);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    return true;
+}
+
+bool block_intersects_player(int blockX, int blockY, int blockZ,
+                              const Camera& camera) noexcept {
+    constexpr float kPlayerRadius = 0.30F;
+    constexpr float kPlayerHeight = 1.80F;
+    if (!std::isfinite(camera.position.x) ||
+        !std::isfinite(camera.position.y) ||
+        !std::isfinite(camera.position.z)) {
+        return true;
+    }
+
+    const float playerMinX = camera.position.x - kPlayerRadius;
+    const float playerMaxX = camera.position.x + kPlayerRadius;
+    const float playerFeetY = camera.position.y - camera.eyeHeight;
+    const float playerMaxY = playerFeetY + kPlayerHeight;
+    const float playerMinZ = camera.position.z - kPlayerRadius;
+    const float playerMaxZ = camera.position.z + kPlayerRadius;
+
+    return static_cast<float>(blockX) < playerMaxX &&
+           static_cast<float>(blockX + 1LL) > playerMinX &&
+           static_cast<float>(blockY) < playerMaxY &&
+           static_cast<float>(blockY + 1) > playerFeetY &&
+           static_cast<float>(blockZ) < playerMaxZ &&
+           static_cast<float>(blockZ + 1LL) > playerMinZ;
+}
+
+void apply_block_action(int action) {
+    if (!g_has_target || g_chunk_manager == nullptr || g_camera == nullptr) {
+        return;
+    }
+
+    if (action == 1) {
+        if (!g_chunk_manager->set_world_block(
+                g_current_hit.x, g_current_hit.y, g_current_hit.z,
+                convergence::Chunk::kAir)) {
+            log_error("Break action could not modify the targeted chunk.");
+        }
+        return;
+    }
+
+    if (action != 2 ||
+        (g_current_hit.nx == 0 && g_current_hit.ny == 0 &&
+         g_current_hit.nz == 0)) {
+        return;  // No entering face (e.g. camera started inside a block).
+    }
+
+    const std::int64_t placeX =
+        static_cast<std::int64_t>(g_current_hit.x) + g_current_hit.nx;
+    const std::int64_t placeY =
+        static_cast<std::int64_t>(g_current_hit.y) + g_current_hit.ny;
+    const std::int64_t placeZ =
+        static_cast<std::int64_t>(g_current_hit.z) + g_current_hit.nz;
+
+    if (placeX < std::numeric_limits<int>::min() ||
+        placeX > std::numeric_limits<int>::max() ||
+        placeZ < std::numeric_limits<int>::min() ||
+        placeZ > std::numeric_limits<int>::max() ||
+        placeY < 0 || placeY >= cvg::SY) {
+        return;
+    }
+
+    const int x = static_cast<int>(placeX);
+    const int y = static_cast<int>(placeY);
+    const int z = static_cast<int>(placeZ);
+    if (g_chunk_manager->get_world_block(x, y, z) !=
+            convergence::Chunk::kAir ||
+        block_intersects_player(x, y, z, *g_camera)) {
+        return;
+    }
+
+    if (!g_chunk_manager->set_world_block(
+            x, y, z, convergence::Chunk::kGrass)) {
+        log_error("Place action failed: destination chunk is not loaded.");
+    }
+}
+
+void render_target_highlight(float aspect) {
+    if (!g_has_target || g_highlight_program == 0 ||
+        g_highlight_vao == 0 || g_camera == nullptr) {
+        return;
+    }
+
+    const glm::mat4 mvp =
+        g_camera->getProjectionMatrix(std::max(aspect, 0.001F)) *
+        g_camera->getViewMatrix();
+
+    glUseProgram(g_highlight_program);
+    glUniformMatrix4fv(
+        g_highlight_mvp_location, 1, GL_FALSE, glm::value_ptr(mvp));
+    glUniform3f(
+        g_highlight_offset_location,
+        static_cast<float>(g_current_hit.x),
+        static_cast<float>(g_current_hit.y),
+        static_cast<float>(g_current_hit.z));
+
+    // Keep depth testing enabled so the back edges are occluded by the block.
+    glDepthMask(GL_FALSE);
+    glLineWidth(1.0F);
+    glBindVertexArray(g_highlight_vao);
+    glDrawArrays(GL_LINES, 0, 24);
+    glBindVertexArray(0);
+    glDepthMask(GL_TRUE);
+    glUseProgram(0);
 }
 
 void delete_gpu_chunk(GpuChunkMesh& mesh) noexcept {
@@ -372,6 +564,7 @@ Java_com_convergence_voxel_VoxelRenderer_nativeCleanup(
     // Stop and join the CPU worker before releasing its immutable generator.
     g_chunk_manager.reset();
     g_world_generator.reset();
+    cleanup_highlight();
     cleanup_gpu_chunks();
     if (g_program != 0) {
         glDeleteProgram(g_program);
@@ -396,6 +589,7 @@ Java_com_convergence_voxel_VoxelRenderer_nativeInit(
     // runtime before recreating resources for a new EGL context.
     g_chunk_manager.reset();  // Joins the CPU worker before its generator is released.
     g_world_generator.reset();
+    cleanup_highlight();
     cleanup_gpu_chunks();
     if (g_program != 0) {
         glDeleteProgram(g_program);
@@ -426,7 +620,10 @@ Java_com_convergence_voxel_VoxelRenderer_nativeInit(
     g_camera->lookSensitivity = 0.15F;
 
     AAssetManager* manager = AAssetManager_fromJava(env, asset_manager);
-    g_program = create_program(manager);
+    g_program = create_program(
+        manager,
+        "shaders/vertex_shader.glsl",
+        "shaders/fragment_shader.glsl");
     if (g_program == 0) {
         log_error("Renderer initialization stopped because shaders failed.");
         return;
@@ -438,6 +635,10 @@ Java_com_convergence_voxel_VoxelRenderer_nativeInit(
         glDeleteProgram(g_program);
         g_program = 0;
         return;
+    }
+
+    if (!initialize_highlight(manager)) {
+        log_error("Target highlight is unavailable; block actions remain enabled.");
     }
 
     constexpr std::int64_t kWorldSeed = 12345;
@@ -489,6 +690,17 @@ Java_com_convergence_voxel_VoxelRenderer_nativeHandleJoystick(
 }
 
 extern "C" JNIEXPORT void JNICALL
+Java_com_convergence_voxel_VoxelRenderer_nativeRequestAction(
+    JNIEnv* /* env */,
+    jobject /* thiz */,
+    jint action
+) {
+    if (action != 1 && action != 2) return;
+    std::lock_guard<std::mutex> lock(g_input_mutex);
+    g_pending_input.pending_action = static_cast<int>(action);
+}
+
+extern "C" JNIEXPORT void JNICALL
 Java_com_convergence_voxel_VoxelRenderer_nativeResetFrameClock(
     JNIEnv* /* env */,
     jobject /* thiz */
@@ -523,6 +735,7 @@ Java_com_convergence_voxel_VoxelRenderer_nativeRender(
         input = g_pending_input;
         g_pending_input.look_dx = 0.0F;
         g_pending_input.look_dy = 0.0F;
+        g_pending_input.pending_action = 0;
         // Joystick values remain active until the pointer is released.
     }
 
@@ -539,7 +752,29 @@ Java_com_convergence_voxel_VoxelRenderer_nativeRender(
 
     // Worker output is collected and CPU meshes are built on this GL thread.
     g_chunk_manager->update(g_camera->position.x, g_camera->position.z);
-    // Only dirty chunk revisions upload; unchanged chunk VBOs are retained.
+
+    // Resolve the latest camera ray before applying one queued tap action.
+    g_current_hit = raycastVoxels(
+        g_camera->position,
+        g_camera->getFrontVector(),
+        5.0F,
+        g_chunk_manager.get());
+    g_has_target = g_current_hit.hit;
+    if (input.pending_action != 0) {
+        apply_block_action(input.pending_action);
+        // Breaking removes the current target; placing makes the new block
+        // targetable on this same frame.
+        g_current_hit = raycastVoxels(
+            g_camera->position,
+            g_camera->getFrontVector(),
+            5.0F,
+            g_chunk_manager.get());
+        g_has_target = g_current_hit.hit;
+    }
+
+    // Upload only dirty chunk revisions; changed CPU meshes are built by the
+    // next bounded ChunkManager update, never by the input/UI thread.
     (void)upload_changed_chunk_meshes();
     render_chunk_meshes(aspect);
+    render_target_highlight(aspect);
 }

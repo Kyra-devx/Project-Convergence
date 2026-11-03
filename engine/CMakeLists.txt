@@ -20,6 +20,18 @@ target_compile_features(convergence_engine PUBLIC cxx_std_17)
 
 include(CTest)
 if(BUILD_TESTING)
+    include(FetchContent)
+    set(GLM_BUILD_TESTS OFF CACHE BOOL "Disable GLM tests" FORCE)
+    set(GLM_BUILD_LIBRARY OFF CACHE BOOL "Use GLM header-only target" FORCE)
+    set(GLM_BUILD_INSTALL OFF CACHE BOOL "Disable GLM install rules" FORCE)
+    FetchContent_Declare(
+        glm
+        GIT_REPOSITORY https://github.com/g-truc/glm.git
+        GIT_TAG 0af55ccecd98d4e5a8d1fad7de25ba429d60e863
+        GIT_SHALLOW FALSE
+    )
+    FetchContent_MakeAvailable(glm)
+
     add_executable(voxel_world_test tests/voxel_world_test.cpp)
     target_link_libraries(voxel_world_test PRIVATE convergence_engine)
     add_test(NAME voxel_world_test COMMAND voxel_world_test)
@@ -51,4 +63,17 @@ if(BUILD_TESTING)
     target_link_libraries(chunk_manager_test PRIVATE convergence_engine Threads::Threads)
     target_compile_features(chunk_manager_test PRIVATE cxx_std_17)
     add_test(NAME chunk_manager_test COMMAND chunk_manager_test)
+
+    add_executable(
+        raycast_test
+        tests/raycast_test.cpp
+        ${WORLD_GENERATOR_DIR}/WorldGenerator.cpp
+        ${WORLD_GENERATOR_DIR}/ChunkManager.cpp
+        ${WORLD_GENERATOR_DIR}/Raycast.cpp
+    )
+    target_include_directories(raycast_test PRIVATE ${WORLD_GENERATOR_DIR})
+    target_link_libraries(
+        raycast_test PRIVATE convergence_engine glm::glm Threads::Threads)
+    target_compile_features(raycast_test PRIVATE cxx_std_17)
+    add_test(NAME raycast_test COMMAND raycast_test)
 endif()

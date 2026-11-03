@@ -94,6 +94,26 @@ int main() {
     // The shared x=16 plane has no +X face after both chunks are meshed.
     assert(!has_positive_x_face_at(meshes, 16.0F, 20.0F, 29.0F, 8.0F, 9.0F));
 
+    // Editing a block at the +X chunk boundary invalidates both loaded sides.
+    const bool firstEdit =
+        manager.set_world_block(15, 20, 8, convergence::Chunk::kGrass);
+    assert(firstEdit);
+    if (!firstEdit) return 1;
+    assert(manager.get_world_block(15, 20, 8) == convergence::Chunk::kGrass);
+    assert(manager.pending_mesh_count() == 2U);
+    const bool repeatedEdit =
+        manager.set_world_block(15, 20, 8, convergence::Chunk::kGrass);
+    assert(repeatedEdit);
+    assert(manager.pending_mesh_count() == 2U);  // Idempotent write.
+    manager.update(8.0F, 8.0F);
+    assert(manager.pending_mesh_count() == 0U);
+    const bool invalidY =
+        manager.set_world_block(15, -1, 8, convergence::Chunk::kStone);
+    const bool unloadedChunk =
+        manager.set_world_block(1000, 20, 8, convergence::Chunk::kStone);
+    assert(!invalidY);
+    assert(!unloadedChunk);
+
     const std::uint64_t revisionBeforeMove = manager.mesh_revision();
     manager.update(160.0F, 8.0F);  // Camera enters chunk X=10.
     assert(manager.mesh_revision() > revisionBeforeMove);
@@ -114,12 +134,25 @@ int main() {
     negativeManager.update(-0.5F, -0.5F);
     const auto deadline =
         std::chrono::steady_clock::now() + std::chrono::seconds(5);
-    while (!negativeManager.is_chunk_loaded(-1, -1) &&
+    while ((!negativeManager.is_chunk_loaded(-1, -1) ||
+            negativeManager.pending_generation_count() != 0U ||
+            negativeManager.pending_mesh_count() != 0U) &&
            std::chrono::steady_clock::now() < deadline) {
         negativeManager.update(-0.5F, -0.5F);
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
     assert(negativeManager.is_chunk_loaded(-1, -1));
+    assert(negativeManager.pending_generation_count() == 0U);
+    assert(negativeManager.pending_mesh_count() == 0U);
+    assert(negativeManager.get_world_block(-1, 20, -1) ==
+           convergence::Chunk::kStone);
+    const bool negativeEdit = negativeManager.set_world_block(
+        -1, 20, -1, convergence::Chunk::kGrass);
+    assert(negativeEdit);
+    if (!negativeEdit) return 1;
+    assert(negativeManager.get_world_block(-1, 20, -1) ==
+           convergence::Chunk::kGrass);
+    assert(negativeManager.pending_mesh_count() == 1U);
     negativeManager.cleanup();
 
     // Non-finite camera input is ignored.

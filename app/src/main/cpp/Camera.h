@@ -20,9 +20,7 @@ public:
     void processMovement(float forward, float strafe, float deltaTime);
     void applyGroundCollision(float terrainHeight) noexcept;
 
+    [[nodiscard]] glm::vec3 getFrontVector() const;
     [[nodiscard]] glm::mat4 getViewMatrix() const;
     [[nodiscard]] glm::mat4 getProjectionMatrix(float aspect) const;
-
-private:
-    [[nodiscard]] glm::vec3 getFrontVector() const;
 };

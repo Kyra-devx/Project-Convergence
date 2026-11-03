@@ -161,6 +161,10 @@ final class VoxelGLSurfaceView extends GLSurfaceView {
         renderer.resetFrameClock();
     }
 
+    void requestAction(int action) {
+        renderer.requestAction(action);
+    }
+
     boolean isJoystickActive() {
         return joystickPointerId != MotionEvent.INVALID_POINTER_ID;
     }

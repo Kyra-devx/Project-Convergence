@@ -105,6 +105,21 @@ Status describes repository evidence. A checked item means the corresponding cod
 
 **B.6 limitations:** generation is asynchronous, but CPU meshing remains on the GL thread. Each changed chunk is uploaded independently, avoiding a full-world VBO refresh; this trades larger uploads for more draw calls (up to one per loaded chunk with a non-empty mesh). One worker is used; multi-worker scheduling, frustum culling, GPU instancing, and persistence are future work. A source-level implementation is not evidence of stable 60 FPS.
 
+### B.7 — Block Interaction and Target Highlight
+
+- [x] Amanatides-Woo DDA voxel raycast with normalized direction and maximum reach 5
+- [x] World-space block reads and edits using integer floor division for negative coordinates
+- [x] Dirty-mesh invalidation for the edited chunk and loaded cardinal neighbors at boundaries
+- [x] Break and place actions queued from Android UI and consumed on the GL thread
+- [x] Placement rejects occupied destinations, out-of-range Y, missing chunks, and player AABB overlap
+- [x] Depth-tested black wireframe target highlight using GL-owned VAO/VBO resources
+- [x] Raycast, negative-coordinate, range, and block-edit regression tests added
+- [ ] Native CMake/CTest execution
+- [ ] Android NDK/APK build and EGL runtime verification
+- [ ] Device verification of touch buttons, targeting, and visual highlight
+
+**B.7 limitations:** placement uses the grass block ID and a simple player AABB; block palette, textures, persistence, and device/runtime verification remain future work.
+
 ## Phase C — Redstone Simulation
 
 - [ ] Versioned behavioral reference specification

@@ -31,6 +31,7 @@ add_library(
     Camera.cpp
     WorldGenerator.cpp
     ChunkManager.cpp
+    Raycast.cpp
 )
 target_compile_features(convergence PRIVATE cxx_std_17)
 target_include_directories(convergence PRIVATE ${CMAKE_CURRENT_LIST_DIR})

@@ -146,6 +146,70 @@ std::uint8_t ChunkManager::get_world_block(
     return get_world_block64(worldX, worldY, worldZ);
 }
 
+bool ChunkManager::set_world_block(
+    int worldX, int worldY, int worldZ, std::uint8_t block
+) {
+    if (worldY < 0 || worldY >= cvg::SY) return false;
+
+    const std::int64_t chunkX64 = floor_div(worldX, kChunkSizeX);
+    const std::int64_t chunkZ64 = floor_div(worldZ, kChunkSizeZ);
+    if (chunkX64 < std::numeric_limits<int>::min() ||
+        chunkX64 > std::numeric_limits<int>::max() ||
+        chunkZ64 < std::numeric_limits<int>::min() ||
+        chunkZ64 > std::numeric_limits<int>::max()) {
+        return false;
+    }
+
+    const int chunkX = static_cast<int>(chunkX64);
+    const int chunkZ = static_cast<int>(chunkZ64);
+    const int localX = static_cast<int>(
+        static_cast<std::int64_t>(worldX) - chunkX64 * kChunkSizeX);
+    const int localZ = static_cast<int>(
+        static_cast<std::int64_t>(worldZ) - chunkZ64 * kChunkSizeZ);
+
+    const auto found = chunks_.find({chunkX, chunkZ});
+    if (found == chunks_.end()) return false;
+
+    convergence::Chunk& chunk = *found->second;
+    if (chunk.block_at(localX, worldY, localZ) == block) {
+        return true;  // Idempotent edit: do not enqueue redundant remeshing.
+    }
+    if (!chunk.set_block(localX, worldY, localZ, block)) {
+        return false;
+    }
+
+    mark_chunk_dirty(chunkX, chunkZ);
+    const auto mark_neighbor_if_representable =
+        [this](std::int64_t neighborX, std::int64_t neighborZ) {
+            if (neighborX < std::numeric_limits<int>::min() ||
+                neighborX > std::numeric_limits<int>::max() ||
+                neighborZ < std::numeric_limits<int>::min() ||
+                neighborZ > std::numeric_limits<int>::max()) {
+                return;
+            }
+            mark_chunk_dirty(
+                static_cast<int>(neighborX), static_cast<int>(neighborZ));
+        };
+
+    if (localX == 0) {
+        mark_neighbor_if_representable(
+            static_cast<std::int64_t>(chunkX) - 1, chunkZ);
+    }
+    if (localX == kChunkSizeX - 1) {
+        mark_neighbor_if_representable(
+            static_cast<std::int64_t>(chunkX) + 1, chunkZ);
+    }
+    if (localZ == 0) {
+        mark_neighbor_if_representable(
+            chunkX, static_cast<std::int64_t>(chunkZ) - 1);
+    }
+    if (localZ == kChunkSizeZ - 1) {
+        mark_neighbor_if_representable(
+            chunkX, static_cast<std::int64_t>(chunkZ) + 1);
+    }
+    return true;
+}
+
 std::vector<ChunkMeshView> ChunkManager::chunk_meshes() const {
     std::vector<ChunkMeshView> views;
     views.reserve(chunks_.size());

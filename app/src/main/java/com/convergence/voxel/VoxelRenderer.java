@@ -9,6 +9,9 @@ import javax.microedition.khronos.opengles.GL10;
 
 /** Bridges Android's GL thread to the native voxel renderer and camera. */
 final class VoxelRenderer implements GLSurfaceView.Renderer {
+    static final int ACTION_BREAK = 1;
+    static final int ACTION_PLACE = 2;
+
     static {
         System.loadLibrary("convergence");
     }
@@ -27,6 +30,7 @@ final class VoxelRenderer implements GLSurfaceView.Renderer {
     private native void nativeHandleLook(float deltaX, float deltaY);
     private native void nativeHandleJoystick(float forward, float strafe);
     private native void nativeResetFrameClock();
+    private native void nativeRequestAction(int action);
 
     @Override
     public void onSurfaceCreated(GL10 gl, EGLConfig config) {
@@ -55,5 +59,11 @@ final class VoxelRenderer implements GLSurfaceView.Renderer {
 
     void resetFrameClock() {
         nativeResetFrameClock();
+    }
+
+    void requestAction(int action) {
+        if (action == ACTION_BREAK || action == ACTION_PLACE) {
+            nativeRequestAction(action);
+        }
     }
 }

@@ -33,6 +33,7 @@ Mengeksplorasi arsitektur voxel yang memadukan kedalaman mekanik, runtime native
 | **B.4 World generation** | Implementasi prototipe tersedia | FastNoiseLite height/detail noise, seeded terrain, vertical chunk sections, gravity, dan floor collision; biome application, save persistence, serta horizontal streaming belum tersedia |
 | **B.5 Chunk streaming** | Implementasi prototipe tersedia | Radius chunk dinamis, culling tetangga, load/unload dan mesh revision; generation masih sinkron hingga B.6 |
 | **B.6 Async generation** | Implementasi prototipe tersedia | Worker thread menghasilkan block data; ready queue, mesh budget 2 per frame, dan upload VBO per chunk hanya saat mesh berubah pada GL thread; build/perangkat belum diverifikasi |
+| **B.7 Block interaction** | Implementasi sumber tersedia | DDA raycast 5 blok, break/place, invalidasi mesh tetangga, wireframe highlight, dan tombol Android; test/build/perangkat belum diverifikasi |
 | **C. Redstone Engine** | Direncanakan | Scheduler deterministik, update order, dan test suite |
 | **D. Combat System** | Direncanakan | Timing, shield, damage model, dan kontrol sentuh |
 | **E. Compatibility Layer** | Riset | Parser serta adapter berbasis subset; bukan janji menjalankan semua mod Java |
@@ -83,6 +84,16 @@ Batas saat ini: neighbor yang belum dimuat diperlakukan sebagai udara. Saat chun
 
 Kontrol ini kini mencakup gravity dasar dan floor collision berbasis heightmap. Jump, sprint, touch sensitivity settings, dan gesture customization belum tersedia. Build Android dan pemeriksaan input di perangkat fisik tetap perlu diverifikasi.
 
+## Fase B.7 — Block interaction
+
+- Amanatides-Woo DDA targets loaded world blocks up to 5 world units from the camera.
+- Break removes the target block; Place creates a grass block against the hit face when the destination is air, loaded, inside world height, and outside the player's body AABB.
+- Edits at chunk edges invalidate the edited chunk and the loaded cardinal neighbor so cross-chunk face culling is rebuilt.
+- A black wireframe cube highlights the current target with depth testing enabled.
+- Android Break and Place buttons enqueue actions; the GL render thread consumes them and owns every OpenGL call.
+
+The highlight shaders are stored under `app/src/main/assets/shaders/` because the native renderer loads shader text through Android's `AAssetManager`. Block palette, texture atlas, save/load, Android build, CTest, and device verification remain pending.
+
 ## Struktur repository
 
 ~~~~text
@@ -105,6 +116,7 @@ Kontrol ini kini mencakup gravity dasar dan floor collision berbasis heightmap. 
 │       │   ├── Camera.h / Camera.cpp
 │       │   ├── WorldGenerator.h / WorldGenerator.cpp
 │       │   ├── ChunkManager.h / ChunkManager.cpp
+│       │   ├── Raycast.h / Raycast.cpp
 │       │   └── native-lib.cpp
 │       ├── assets/shaders/
 │       └── res/

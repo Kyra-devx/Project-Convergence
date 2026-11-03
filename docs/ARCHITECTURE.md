@@ -54,7 +54,8 @@ The overlay is a transparent Android View above the GLSurfaceView. It captures t
 - native-lib.cpp: JNI boundary, GL shader setup, generated terrain mesh upload, input synchronization, delta-time loop, camera updates, and draw call.
 - VoxelDims.h: canonical 16 × 128 × 16 chunk dimensions and contiguous block indexing.
 - WorldGenerator.h / WorldGenerator.cpp: seeded height/detail noise, complete 128-block chunk data, surface layers, and terrain-height sampling.
-- ChunkManager.h / ChunkManager.cpp: signed X/Z chunk coordinates, worker lifecycle, bounded pending/ready queues, incremental loading/unloading, neighbor lookup, mesh budget, and merged CPU geometry.
+- ChunkManager.h / ChunkManager.cpp: signed X/Z chunk coordinates, worker lifecycle, bounded pending/ready queues, incremental loading/unloading, neighbor lookup, mesh budget, world block edits, and CPU geometry.
+- Raycast.h / Raycast.cpp: Amanatides-Woo DDA traversal of loaded world blocks; no OpenGL or worker-thread access.
 
 ### app/src/main/assets/shaders/
 
@@ -108,7 +109,7 @@ The screen is divided into two input zones:
 
 One pointer per zone is tracked by pointer ID, allowing simultaneous movement and look. Additional pointers in an already-owned zone are ignored. Pointer-up releases only the matching control; ACTION_CANCEL and Activity pause reset all movement values.
 
-The overlay visual is a simple touch indicator, not an interactive HUD system. Sensitivity settings, gesture remapping, button actions, and accessibility options remain future work.
+The overlay visual is a simple touch indicator. Break and Place buttons sit above the transparent touch overlay at the lower right; buttons enqueue one action through a mutex-protected JNI input snapshot. Sensitivity settings, gesture remapping, and broader accessibility options remain future work.
 
 ## 8. World Data, Chunks, and Mesh Generation
 
@@ -130,7 +131,7 @@ Initial Android baseline: OpenGL ES 3.0.
 6. Keep one VAO/VBO per loaded chunk. Upload only when that chunk’s mesh revision changes, using GL_DYNAMIC_DRAW.
 7. Update Camera and ChunkManager, calculate projection × view, apply the chunk X/Z model transform, upload uMVP, and draw each ready chunk on the GL thread.
 
-Depth testing and back-face culling remain enabled. Face winding is checked by native tests. ChunkManager maintains CPU meshes per loaded column. The renderer owns a matching VAO/VBO per chunk and uploads only a chunk whose mesh revision changed; unloaded chunk GPU resources are deleted on the GL thread. Draw calls are issued per chunk with an X/Z model translation. Terrain block generation runs on one worker; mesh building (budget 2/update) and GPU upload remain on the GL thread. This avoids repeated full-world buffer uploads but increases draw-call count with the number of loaded chunks. Frustum culling, greedy meshing, transparent passes, and level-of-detail selection are not implemented.
+Depth testing and back-face culling remain enabled. Face winding is checked by native tests. ChunkManager maintains CPU meshes per loaded column. The renderer owns a matching VAO/VBO per chunk and uploads only a chunk whose mesh revision changed; unloaded chunk GPU resources are deleted on the GL thread. Draw calls are issued per chunk with an X/Z model translation. Terrain block generation runs on one worker; mesh building (budget 2/update) and GPU upload remain on the GL thread. This avoids repeated full-world buffer uploads but increases draw-call count with the number of loaded chunks. The target highlight uses a separate shader and wireframe VAO/VBO created, drawn, and deleted on the GL thread with depth testing enabled. Raycast and block edits also run on the GL thread; edits mark the current chunk and loaded cardinal neighbor dirty at X/Z boundaries. Frustum culling, greedy meshing, transparent passes, and level-of-detail selection are not implemented.
 
 ## 10. Persistence, Compatibility, Security
 
@@ -142,7 +143,7 @@ Do not commit secrets, signing keys, local config, or personal data. Treat world
 
 ## 11. Build and Test Strategy
 
-Portable CMake/CTest: voxel bounds, full-height chunk meshing, seeded 16 × 128 × 16 generation, and asynchronous ChunkManager loading/unloading. Tests cover deterministic block data, seed variation, surface layers, negative chunk coordinates, request completion, dirty-mesh draining, neighbor culling, and worker shutdown. These tests are added but remain NOT_RUN until executed in a suitable build environment.
+Portable CMake/CTest: voxel bounds, full-height chunk meshing, seeded 16 × 128 × 16 generation, asynchronous ChunkManager loading/unloading, world edits, and DDA raycasting. Tests cover deterministic block data, seed variation, surface layers, negative chunk coordinates, request completion, dirty-mesh draining, neighbor culling, boundary edit invalidation, hit distance/normal, maximum reach, invalid ray inputs, and worker shutdown. These tests are added but remain NOT_RUN until executed in a suitable build environment. The raycast test also requires the same pinned GLM dependency used by the Android app.
 
 Android: Gradle app module, CMake native build, emulator/device smoke test, multi-touch test, pause/resume, EGL surface recreation, and profiling while the 81-column view is populated and the player crosses chunk boundaries. Device verification is distinct from source-level implementation and must be recorded separately.
 
